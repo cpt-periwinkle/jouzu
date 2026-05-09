@@ -57,17 +57,25 @@ _HARDCODED_ITEMS: list[QuizItem] = [
 ]
 
 
-def get_quiz_items() -> list[QuizItem]:
+def get_quiz_items(token: str | None = None) -> list[QuizItem]:
     """
     Return the list of compounds available for the current quiz session.
 
-    This function exists so the rest of the app never references _HARDCODED_ITEMS
-    directly. In Milestone 2, this function will make a WaniKani API call and return
-    live data instead. Because everything calls get_quiz_items(), nothing else changes.
+    If a WaniKani token is provided, fetches the user's current level vocabulary
+    from WaniKani and returns that. Falls back to the hardcoded N4 list if no
+    token is given, the token is invalid, or the WaniKani call returns nothing.
 
-    Milestone 1: returns the hardcoded N4 list.
-    Milestone 2: replaced with live WaniKani data.
+    Args:
+        token: Optional WaniKani personal access token.
+
+    Returns:
+        A list of QuizItems from WaniKani, or the hardcoded N4 fallback.
     """
+    if token:
+        from backend.services.wanikani import get_items_for_token
+        items = get_items_for_token(token)
+        if items:
+            return items
     return _HARDCODED_ITEMS
 
 

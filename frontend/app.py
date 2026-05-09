@@ -29,8 +29,7 @@ import os
 import requests
 import streamlit as st
 
-# API_BASE_URL defaults to localhost for local development.
-# In Milestone 6 (deployment), this is overridden by an environment variable
+# Overridden by an environment variable in deployment (Milestone 6)
 # so the frontend knows where the deployed backend lives.
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
@@ -40,37 +39,35 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 # ---------------------------------------------------------------------------
 
 def _init_state() -> None:
-    """
-    Initialise session state keys on first load.
-
-    Because Streamlit reruns the whole script on every interaction, we
-    cannot use 'if key not in st.session_state' inside main() directly --
-    it would reset on every run. This function uses 'not in' checks so
-    keys are only set once (on the very first run) and preserved after that.
-
-    current_item: the compound currently shown to the user (dict from the API).
-    result:       the API response after a guess is submitted (dict), or None
-                  if the user hasn't submitted yet for this compound.
-    """
+    """Set session state keys on first load only. Safe to call on every rerun."""
     if "current_item" not in st.session_state:
         st.session_state.current_item = None
     if "result" not in st.session_state:
         st.session_state.result = None
+    if "wanikani_token" not in st.session_state:
+        st.session_state.wanikani_token = ""
 
 
 def _load_new_item() -> None:
     """
     Fetch a random quiz item from the backend and reset result state.
 
-    Stores the item in st.session_state so it survives the next rerun.
-    Resets result to None so the UI goes back to the input state.
+    Passes the WaniKani token as a query parameter if one is set.
+    The backend uses it to draw from WaniKani vocabulary; without it,
+    falls back to the hardcoded N4 list.
 
-    raise_for_status() turns any non-2xx HTTP response into an exception.
-    ConnectionError means the backend isn't running -- we show a helpful
-    message and call st.stop() to halt the current rerun immediately.
+    The first call with a new token will be slow (~2-5s) while the backend
+    fetches and caches the WaniKani subjects. Subsequent calls are fast.
     """
+    token = st.session_state.wanikani_token
+    params = {"wanikani_token": token} if token else {}
+
     try:
-        response = requests.get(f"{API_BASE_URL}/quiz/item", timeout=5)
+        response = requests.get(
+            f"{API_BASE_URL}/quiz/item",
+            params=params,
+            timeout=20,  # extra time for first WaniKani fetch
+        )
         response.raise_for_status()
         st.session_state.current_item = response.json()
         st.session_state.result = None
@@ -80,16 +77,7 @@ def _load_new_item() -> None:
 
 
 def _submit_guess(guess: str) -> None:
-    """
-    Send the user's guess to the backend and store the explanation result.
-
-    Posts to /quiz/explain with the compound, correct reading, and guess.
-    The backend handles closeness detection and the Claude call -- this
-    function just fires the request and saves what comes back.
-
-    timeout=30 gives Claude enough time to respond without hanging forever.
-    The result dict has three keys: is_correct, closeness, explanation.
-    """
+    """POST the guess to /quiz/explain and store the result in session state."""
     item = st.session_state.current_item
     try:
         response = requests.post(
@@ -99,7 +87,7 @@ def _submit_guess(guess: str) -> None:
                 "reading": item["reading"],
                 "guess": guess,
             },
-            timeout=30,
+            timeout=30,  # Claude needs time to respond
         )
         response.raise_for_status()
         st.session_state.result = response.json()
@@ -108,47 +96,78 @@ def _submit_guess(guess: str) -> None:
         st.stop()
 
 
+def _render_sidebar() -> None:
+    """
+    Render the WaniKani token input in the sidebar.
+
+    type="password" masks the token so it's not visible on screen.
+    When the token changes, current_item is cleared to force a fresh
+    fetch from WaniKani with the new token on the next round.
+    """
+    with st.sidebar:
+        st.header("WaniKani")
+        st.caption(
+            "Paste a read-only API token from "
+            "[wanikani.com/settings/personal_access_tokens]"
+            "(https://www.wanikani.com/settings/personal_access_tokens) "
+            "to drill your current level's vocabulary."
+        )
+
+        token = st.text_input(
+            "API Token",
+            type="password",
+            placeholder="Paste your token here",
+            key="token_input",
+        )
+
+        # If the token has changed, clear the current item so the next
+        # load picks from the new source (WaniKani or hardcoded fallback).
+        if token != st.session_state.wanikani_token:
+            st.session_state.wanikani_token = token
+            st.session_state.current_item = None
+            st.session_state.result = None
+
+        st.divider()
+
+        if st.session_state.wanikani_token:
+            st.success("Using your WaniKani vocabulary")
+        else:
+            st.info("Using hardcoded N4 fallback")
+
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     """
-    Main UI function. Streamlit calls this on every rerun.
+    Main UI function, called on every rerun.
 
-    The UI has two states controlled by whether st.session_state.result is None:
-
-      State 1 (result is None): show the compound, text input, Submit + Skip buttons.
-      State 2 (result is set):  show the closeness feedback, Claude's explanation,
-                                and a Next button that loads a new compound.
-
-    st.rerun() is called after any state change so the UI immediately reflects
-    the new state instead of waiting for the next user interaction.
+    Two states driven by st.session_state.result:
+      None     -- show compound, input field, Submit + Skip
+      not None -- show closeness feedback, Claude's explanation, Next button
     """
     st.set_page_config(page_title="Jouzu", page_icon="上", layout="centered")
     _init_state()
+    _render_sidebar()
 
     st.title("Jouzu 上手")
     st.caption("Kanji reading drill -- learn the patterns, not just the answers.")
 
-    # Load the first compound on initial page load.
     if st.session_state.current_item is None:
-        _load_new_item()
+        with st.spinner("Fetching vocabulary..."):
+            _load_new_item()
 
     item = st.session_state.current_item
     result = st.session_state.result
 
-    # --- Compound display ---
-    # unsafe_allow_html is needed for inline CSS styling.
-    # Streamlit's native text elements don't support font-size control.
+    # Large centered compound display.
     st.markdown(
         f"<h1 style='text-align:center; font-size:4rem;'>{item['characters']}</h1>",
         unsafe_allow_html=True,
     )
 
-    # Before submission: hide the meaning behind an expander so the user
-    # can check if stuck without it being a spoiler. After submission: show
-    # it plainly since the round is over.
+    # Hide meaning behind expander before submission; show it plainly after.
     if result:
         st.markdown(
             f"<p style='text-align:center; color:gray;'>{item['meaning']}</p>",
@@ -158,18 +177,14 @@ def main() -> None:
         with st.expander("Show meaning"):
             st.write(item["meaning"])
 
-    # --- State 1: input area ---
+    # --- State 1: input ---
     if result is None:
         guess = st.text_input(
             "Your reading (hiragana or romaji):",
             placeholder="e.g. でんしゃ or densha",
             key="guess_input",
-            # key= is required when the same widget type appears multiple times
-            # in a script, or when you need Streamlit to track its value across reruns.
         )
 
-        # st.columns splits the row into equal-width sections.
-        # [1, 1] means two columns of equal width.
         col1, col2 = st.columns([1, 1])
         with col1:
             if st.button("Submit", use_container_width=True, type="primary"):
@@ -183,10 +198,8 @@ def main() -> None:
                 _load_new_item()
                 st.rerun()
 
-    # --- State 2: result area ---
+    # --- State 2: result ---
     else:
-        # closeness comes from the backend's measure_closeness() in services/quiz.py.
-        # It drives both the color of the feedback banner and the tone of Claude's explanation.
         closeness = result.get("closeness", "off")
         reading = item["reading"]
 
@@ -200,8 +213,6 @@ def main() -> None:
             st.error(f"Not quite. The correct reading is {reading}")
 
         st.divider()
-        # Claude's explanation is plain markdown text -- st.markdown renders
-        # headers, bold, bullet lists, etc. automatically.
         st.markdown(result["explanation"])
         st.divider()
 

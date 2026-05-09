@@ -11,7 +11,7 @@ import anthropic
 # ANTHROPIC_API_KEY is loaded from .env in core/config.py.
 # Importing it here instead of calling os.environ directly keeps all
 # environment variable handling in one place.
-from backend.core.config import ANTHROPIC_API_KEY
+from backend.core.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 
 # ExplainResponse is the Pydantic model that defines what this service returns:
 # an is_correct flag and the explanation text from Claude.
@@ -69,7 +69,7 @@ def get_explanation(characters: str, reading: str, guess: str) -> ExplainRespons
     )
 
     message = _client.messages.create(
-        model="claude-sonnet-4-6",
+        model=ANTHROPIC_MODEL,
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )

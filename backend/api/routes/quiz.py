@@ -22,18 +22,21 @@ router = APIRouter(prefix="/quiz", tags=["quiz"])
 
 
 @router.get("/item", response_model=QuizItem)
-def get_quiz_item() -> QuizItem:
+def get_quiz_item(wanikani_token: str | None = None) -> QuizItem:
     """
     Return a random compound from the active quiz item list.
 
-    In Milestone 1 this draws from the hardcoded N4 list in services/quiz.py.
-    In Milestone 2 it will draw from the user's WaniKani vocabulary -- the
-    endpoint itself doesn't change, only what get_quiz_items() returns.
+    Accepts an optional wanikani_token query parameter. When provided, the
+    item is drawn from the user's WaniKani current-level vocabulary. Without
+    a token, falls back to the hardcoded N4 list.
+
+    In Milestone 5, the source (current level / all reviewed / hardcoded)
+    will be selectable via a separate query parameter.
 
     Returns 404 if the item list is empty, which should not happen in normal
     operation but guards against a misconfigured WaniKani token returning nothing.
     """
-    items = get_quiz_items()
+    items = get_quiz_items(token=wanikani_token)
     if not items:
         raise HTTPException(status_code=404, detail="No quiz items available.")
     return random.choice(items)
