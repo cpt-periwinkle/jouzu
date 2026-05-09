@@ -11,6 +11,7 @@ import os
 import sys
 
 import anthropic
+from anthropic.types import TextBlock
 import httpx
 from dotenv import load_dotenv
 
@@ -30,7 +31,8 @@ def check_anthropic() -> None:
         max_tokens=16,
         messages=[{"role": "user", "content": "Reply with the word OK only."}],
     )
-    reply = response.content[0].text.strip()
+    block = response.content[0]
+    reply = block.text.strip() if isinstance(block, TextBlock) else repr(block)
     print(f"PASS  Anthropic API key works. Model replied: {reply!r}")
 
 
