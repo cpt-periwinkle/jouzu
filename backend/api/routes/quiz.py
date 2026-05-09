@@ -54,5 +54,7 @@ def explain(request: ExplainRequest) -> ExplainResponse:
     return get_explanation(
         characters=request.characters,
         reading=request.reading,
+        accepted_readings=request.accepted_readings,
         guess=request.guess,
+        subject_type=request.subject_type,
     )

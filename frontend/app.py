@@ -85,7 +85,9 @@ def _submit_guess(guess: str) -> None:
             json={
                 "characters": item["characters"],
                 "reading": item["reading"],
+                "accepted_readings": item["accepted_readings"],
                 "guess": guess,
+                "subject_type": item.get("subject_type", "vocabulary"),
             },
             timeout=30,  # Claude needs time to respond
         )
@@ -161,9 +163,18 @@ def main() -> None:
     item = st.session_state.current_item
     result = st.session_state.result
 
-    # Large centered compound display.
+    # Color matches WaniKani: pink for kanji, purple for vocabulary.
+    subject_type = item.get("subject_type", "vocabulary")
+    color = "#f02049" if subject_type == "kanji" else "#9820f0"
+
     st.markdown(
-        f"<h1 style='text-align:center; font-size:4rem;'>{item['characters']}</h1>",
+        f"<h1 style='text-align:center; font-size:4rem; color:{color};'>"
+        f"{item['characters']}</h1>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='text-align:center; color:gray; font-size:0.85rem;'>"
+        f"{subject_type}</p>",
         unsafe_allow_html=True,
     )
 

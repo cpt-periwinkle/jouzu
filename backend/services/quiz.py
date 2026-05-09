@@ -15,7 +15,8 @@ from backend.models.quiz import QuizItem
 
 # pykakasi is initialized once when Python first imports this file, not on every
 # function call. Initialization is slow; calling .convert() on an existing instance
-# is fast.
+# is fast. The underscore prefix means this is private -- nothing outside this
+# file should use it directly.
 _kakasi = pykakasi.kakasi()
 
 
@@ -27,33 +28,38 @@ _kakasi = pykakasi.kakasi()
 #   on+kun : first kanji on'yomi, second kun'yomi. Called 湯桶読み (yutou-yomi).
 #   kun+on : first kanji kun'yomi, second on'yomi. Called 重箱読み (juubako-yomi).
 #   irreg  : irregular reading that does not follow any standard pattern.
+#
+# ALL_CAPS signals this is a constant that should not be reassigned.
+# The underscore prefix makes it private to this file.
+# Hardcoded items are all vocabulary -- accepted_readings matches reading since
+# vocabulary subjects have one primary reading.
 
 _HARDCODED_ITEMS: list[QuizItem] = [
     # on + on
-    QuizItem(characters="電車", reading="でんしゃ", meaning="train"),
-    QuizItem(characters="学生", reading="がくせい", meaning="student"),
-    QuizItem(characters="食堂", reading="しょくどう", meaning="cafeteria"),
-    QuizItem(characters="旅行", reading="りょこう", meaning="travel"),
-    QuizItem(characters="音楽", reading="おんがく", meaning="music"),
-    QuizItem(characters="病院", reading="びょういん", meaning="hospital"),
-    QuizItem(characters="図書館", reading="としょかん", meaning="library"),
-    QuizItem(characters="電話", reading="でんわ", meaning="telephone"),
+    QuizItem(characters="電車", reading="でんしゃ", accepted_readings=["でんしゃ"], meaning="train", subject_type="vocabulary"),
+    QuizItem(characters="学生", reading="がくせい", accepted_readings=["がくせい"], meaning="student", subject_type="vocabulary"),
+    QuizItem(characters="食堂", reading="しょくどう", accepted_readings=["しょくどう"], meaning="cafeteria", subject_type="vocabulary"),
+    QuizItem(characters="旅行", reading="りょこう", accepted_readings=["りょこう"], meaning="travel", subject_type="vocabulary"),
+    QuizItem(characters="音楽", reading="おんがく", accepted_readings=["おんがく"], meaning="music", subject_type="vocabulary"),
+    QuizItem(characters="病院", reading="びょういん", accepted_readings=["びょういん"], meaning="hospital", subject_type="vocabulary"),
+    QuizItem(characters="図書館", reading="としょかん", accepted_readings=["としょかん"], meaning="library", subject_type="vocabulary"),
+    QuizItem(characters="電話", reading="でんわ", accepted_readings=["でんわ"], meaning="telephone", subject_type="vocabulary"),
     # kun + kun
-    QuizItem(characters="手紙", reading="てがみ", meaning="letter"),
-    QuizItem(characters="花火", reading="はなび", meaning="fireworks"),
-    QuizItem(characters="夕方", reading="ゆうがた", meaning="evening"),
-    QuizItem(characters="山道", reading="やまみち", meaning="mountain path"),
+    QuizItem(characters="手紙", reading="てがみ", accepted_readings=["てがみ"], meaning="letter", subject_type="vocabulary"),
+    QuizItem(characters="花火", reading="はなび", accepted_readings=["はなび"], meaning="fireworks", subject_type="vocabulary"),
+    QuizItem(characters="夕方", reading="ゆうがた", accepted_readings=["ゆうがた"], meaning="evening", subject_type="vocabulary"),
+    QuizItem(characters="山道", reading="やまみち", accepted_readings=["やまみち"], meaning="mountain path", subject_type="vocabulary"),
     # on + kun  (yutou-yomi)
-    QuizItem(characters="台所", reading="だいどころ", meaning="kitchen"),
-    QuizItem(characters="気持ち", reading="きもち", meaning="feeling"),
+    QuizItem(characters="台所", reading="だいどころ", accepted_readings=["だいどころ"], meaning="kitchen", subject_type="vocabulary"),
+    QuizItem(characters="気持ち", reading="きもち", accepted_readings=["きもち"], meaning="feeling", subject_type="vocabulary"),
     # kun + on  (juubako-yomi)
-    QuizItem(characters="場所", reading="ばしょ", meaning="place"),
-    QuizItem(characters="合図", reading="あいず", meaning="signal"),
+    QuizItem(characters="場所", reading="ばしょ", accepted_readings=["ばしょ"], meaning="place", subject_type="vocabulary"),
+    QuizItem(characters="合図", reading="あいず", accepted_readings=["あいず"], meaning="signal", subject_type="vocabulary"),
     # irregular
-    QuizItem(characters="今日", reading="きょう", meaning="today"),
-    QuizItem(characters="昨日", reading="きのう", meaning="yesterday"),
-    QuizItem(characters="大人", reading="おとな", meaning="adult"),
-    QuizItem(characters="二人", reading="ふたり", meaning="two people"),
+    QuizItem(characters="今日", reading="きょう", accepted_readings=["きょう"], meaning="today", subject_type="vocabulary"),
+    QuizItem(characters="昨日", reading="きのう", accepted_readings=["きのう"], meaning="yesterday", subject_type="vocabulary"),
+    QuizItem(characters="大人", reading="おとな", accepted_readings=["おとな"], meaning="adult", subject_type="vocabulary"),
+    QuizItem(characters="二人", reading="ふたり", accepted_readings=["ふたり"], meaning="two people", subject_type="vocabulary"),
 ]
 
 
@@ -62,8 +68,8 @@ def get_quiz_items(token: str | None = None) -> list[QuizItem]:
     Return the list of compounds available for the current quiz session.
 
     If a WaniKani token is provided, fetches the user's current level vocabulary
-    from WaniKani and returns that. Falls back to the hardcoded N4 list if no
-    token is given, the token is invalid, or the WaniKani call returns nothing.
+    and kanji from WaniKani and returns that. Falls back to the hardcoded N4 list
+    if no token is given, the token is invalid, or the WaniKani call returns nothing.
 
     Args:
         token: Optional WaniKani personal access token.
@@ -136,71 +142,79 @@ def _edit_distance(a: str, b: str) -> int:
     return dp[n]
 
 
-def measure_closeness(guess: str, correct_reading: str) -> str:
+def measure_closeness(guess: str, accepted_readings: list[str]) -> str:
     """
-    Return how close the user's guess was to the correct reading.
+    Return how close the user's guess was to the best matching accepted reading.
+
+    Checks against all accepted readings and uses the closest match.
+    This matters for kanji subjects which have multiple accepted readings
+    (e.g. 一 accepts いち and ひと).
 
     Both inputs are normalized to romaji before comparison so hiragana
     and romaji guesses are treated identically.
 
     Returns one of four levels based on edit distance:
-      "correct"    -- exact match
-      "very_close" -- 1 character off (e.g. typed 'densa' instead of 'densha')
+      "correct"    -- exact match against any accepted reading
+      "very_close" -- 1 character off from the closest reading
       "close"      -- 2-3 characters off
       "off"        -- more than 3 characters off
 
     Args:
         guess: What the user typed (hiragana or romaji).
-        correct_reading: The correct hiragana reading.
+        accepted_readings: All readings WaniKani accepts as correct.
 
     Returns:
         A closeness level string used by the prompt and frontend.
     """
     guess = guess.strip().lower()
     guess_romaji = _hiragana_to_romaji(guess) if _contains_hiragana(guess) else guess
-    correct_romaji = _hiragana_to_romaji(correct_reading)
-
     guess_romaji = guess_romaji.replace(" ", "")
-    correct_romaji = correct_romaji.replace(" ", "")
 
-    distance = _edit_distance(guess_romaji, correct_romaji)
+    best_distance = min(
+        _edit_distance(
+            guess_romaji,
+            _hiragana_to_romaji(r).replace(" ", "")
+        )
+        for r in accepted_readings
+    )
 
-    if distance == 0:
+    if best_distance == 0:
         return "correct"
-    elif distance == 1:
+    elif best_distance == 1:
         return "very_close"
-    elif distance <= 3:
+    elif best_distance <= 3:
         return "close"
     else:
         return "off"
 
 
-def check_guess(guess: str, correct_reading: str) -> bool:
+def check_guess(guess: str, accepted_readings: list[str]) -> bool:
     """
-    Compare the user's guess against the correct hiragana reading.
+    Compare the user's guess against all accepted readings.
 
     Accepts both hiragana and romaji so users without a Japanese IME are not blocked.
+    Returns True if the guess matches any accepted reading -- important for kanji
+    subjects where multiple readings are correct (e.g. on'yomi and kun'yomi).
 
     .strip() removes accidental leading/trailing whitespace.
     .lower() normalizes case so "Densha" matches "densha".
 
-    If the guess contains hiragana, compare it directly against the correct reading.
-
-    If no hiragana is found (romaji input), convert the correct reading to romaji
-    using _hiragana_to_romaji(), strip spaces from both sides, and compare.
-    The .replace(" ", "") handles pykakasi occasionally inserting a space between morae.
-
     Args:
         guess: What the user typed (hiragana or romaji).
-        correct_reading: The correct hiragana reading from the compound data.
+        accepted_readings: All readings WaniKani accepts as correct.
 
     Returns:
-        True if the guess matches the correct reading.
+        True if the guess matches any accepted reading.
     """
     guess = guess.strip().lower()
 
-    if _contains_hiragana(guess):
-        return guess == correct_reading
+    for reading in accepted_readings:
+        if _contains_hiragana(guess):
+            if guess == reading:
+                return True
+        else:
+            correct_romaji = _hiragana_to_romaji(reading).replace(" ", "")
+            if guess.replace(" ", "") == correct_romaji:
+                return True
 
-    correct_romaji = _hiragana_to_romaji(correct_reading).replace(" ", "")
-    return guess.replace(" ", "") == correct_romaji
+    return False

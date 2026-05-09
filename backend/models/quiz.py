@@ -17,8 +17,15 @@ class QuizItem(BaseModel):
     reading: str
     """Correct hiragana reading, e.g. 'でんしゃ'."""
 
+    accepted_readings: list[str]
+    """All readings WaniKani accepts as correct. Kanji subjects have several;
+    vocabulary subjects typically have one. Closeness is checked against all of them."""
+
     meaning: str
     """English meaning, e.g. 'train'."""
+
+    subject_type: str
+    """WaniKani subject type: 'vocabulary' or 'kanji'."""
 
 
 class ExplainRequest(BaseModel):
@@ -28,10 +35,16 @@ class ExplainRequest(BaseModel):
     """The kanji compound that was shown."""
 
     reading: str
-    """The correct hiragana reading."""
+    """The primary hiragana reading shown in the result banner."""
+
+    accepted_readings: list[str]
+    """All readings WaniKani accepts as correct for this subject."""
 
     guess: str
     """What the user typed -- hiragana or romaji."""
+
+    subject_type: str
+    """WaniKani subject type: 'vocabulary' or 'kanji'."""
 
 
 class ExplainResponse(BaseModel):

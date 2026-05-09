@@ -71,25 +71,46 @@ def _pick_flavor(closeness: str, reading: str) -> str:
 def build_explain_prompt(
     characters: str,
     reading: str,
+    accepted_readings: list[str],
     guess: str,
     closeness: str,
+    subject_type: str,
 ) -> str:
     """
     Build the explanation prompt for a submitted quiz guess.
 
     Gives Claude a consistent tutor persona and passes closeness context
-    so the explanation tone matches how well the student did.
+    so the explanation tone matches how well the student did. Subject type
+    shapes the explanation -- kanji and vocabulary have different pattern rules
+    and kanji may have multiple accepted readings worth noting.
 
     Args:
         characters: The kanji compound shown to the user, e.g. '電車'.
-        reading: The correct hiragana reading, e.g. 'でんしゃ'.
+        reading: The primary hiragana reading, e.g. 'でんしゃ'.
+        accepted_readings: All readings WaniKani accepts as correct.
         guess: What the user typed (hiragana or romaji).
         closeness: One of 'correct', 'very_close', 'close', or 'off'.
+        subject_type: 'vocabulary' or 'kanji'.
 
     Returns:
         A formatted prompt string ready to send to Claude.
     """
     result_line = _pick_flavor(closeness, reading)
+
+    # Tell Claude about all accepted readings when there are multiple,
+    # so it can reference them in the explanation.
+    if len(accepted_readings) > 1:
+        readings_line = f"Accepted readings: {', '.join(accepted_readings)}"
+    else:
+        readings_line = f"Correct reading: {reading}"
+
+    type_context = (
+        "This is a kanji subject. WaniKani may accept multiple readings (on'yomi and/or kun'yomi). "
+        "Reference the component radicals in your explanation where relevant -- "
+        "they are part of WaniKani's mnemonic system and help the student remember the reading."
+        if subject_type == "kanji"
+        else "This is a vocabulary subject. It has one expected reading in context."
+    )
 
     return f"""You are a sharp, fun and encouraging Japanese tutor helping a student prepare for the JLPT N4.
 You are direct and don't pad your explanations with filler. You use Japanese naturally when it fits
@@ -97,19 +118,21 @@ You are direct and don't pad your explanations with filler. You use Japanese nat
 internalize reading patterns so they can predict new compounds they've never seen before.
 
 The student saw the compound: {characters}
-Correct reading: {reading}
+{readings_line}
 Student's guess: {guess}
 Result: {result_line}
+Subject type: {type_context}
 
 Respond in exactly this structure:
 
 1. Reading breakdown
    Show how the reading splits across each kanji. For each kanji, state whether it uses on'yomi
    (Chinese-derived reading) or kun'yomi (native Japanese reading), and give the specific reading
-   for that kanji.
+   for that kanji. For kanji subjects, note all accepted readings.
 
 2. Pattern explanation
    Explain why this compound uses these readings. Reference the general pattern it follows.
+   For kanji subjects, mention the component radicals and how they connect to WaniKani's mnemonics.
    If the student was close, acknowledge what they got right before explaining the slip.
    If they were way off, focus on the pattern without dwelling on the mistake.
 

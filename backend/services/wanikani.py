@@ -58,22 +58,27 @@ def get_user_level(token: str) -> int:
 
 def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
     """
-    Fetch all vocabulary subjects at the given level from WaniKani.
+    Fetch all vocabulary and kanji subjects at the given level from WaniKani.
 
     Follows pagination via pages.next_url until the full list is retrieved.
     Filters out hidden subjects and kana-only vocabulary (no kanji characters).
-    Uses the primary reading and primary meaning from each subject.
+
+    Vocabulary subjects: uses the primary reading as the single accepted reading.
+    Kanji subjects: collects all readings where accepted_answer is True, since
+    WaniKani accepts multiple readings (e.g. both on'yomi and kun'yomi) for kanji.
+    The primary reading is stored as the display reading shown in the result banner.
 
     Args:
         token: The user's WaniKani personal access token.
-        level: The WaniKani level to fetch vocabulary for.
+        level: The WaniKani level to fetch subjects for.
 
     Returns:
         A list of QuizItems built from the filtered subjects.
     """
     items: list[QuizItem] = []
+    # Fetch both vocabulary and kanji -- radicals have no readings so they're excluded.
     url: str | None = (
-        f"{WANIKANI_BASE_URL}/subjects?types=vocabulary&levels={level}"
+        f"{WANIKANI_BASE_URL}/subjects?types=vocabulary,kanji&levels={level}"
     )
 
     while url:
@@ -82,6 +87,7 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
         payload = response.json()
 
         for subject in payload["data"]:
+            subject_type: str = subject["object"]  # "vocabulary" or "kanji"
             data = subject["data"]
 
             # Skip subjects hidden on WaniKani.
@@ -94,13 +100,22 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
             if not _has_kanji(characters):
                 continue
 
-            # Primary reading is the one WaniKani tests in reviews.
             readings = data.get("readings", [])
+
+            # Primary reading is displayed in the result banner after submission.
             primary_reading = next(
                 (r["reading"] for r in readings if r.get("primary")), None
             )
             if not primary_reading:
                 continue
+
+            # Accepted readings are all readings WaniKani marks as correct.
+            # Vocabulary typically has one; kanji can have several (on'yomi, kun'yomi).
+            accepted_readings = [
+                r["reading"] for r in readings if r.get("accepted_answer")
+            ]
+            if not accepted_readings:
+                accepted_readings = [primary_reading]
 
             # Primary meaning is the main English definition.
             meanings = data.get("meanings", [])
@@ -114,7 +129,9 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
                 QuizItem(
                     characters=characters,
                     reading=primary_reading,
+                    accepted_readings=accepted_readings,
                     meaning=primary_meaning,
+                    subject_type=subject_type,
                 )
             )
 

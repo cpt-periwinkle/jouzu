@@ -32,15 +32,21 @@ from backend.services.quiz import measure_closeness
 _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
-def get_explanation(characters: str, reading: str, guess: str) -> ExplainResponse:
+def get_explanation(
+    characters: str,
+    reading: str,
+    accepted_readings: list[str],
+    guess: str,
+    subject_type: str,
+) -> ExplainResponse:
     """
     Evaluate the user's guess and return a Claude-generated explanation.
 
     Steps:
-      1. check_guess() compares the guess against the correct reading and
-         returns True or False.
-      2. build_explain_prompt() slots the compound, reading, guess, and
-         correct/incorrect result into the prompt template.
+      1. measure_closeness() checks the guess against all accepted readings
+         and returns the closest match level.
+      2. build_explain_prompt() slots the compound, reading, guess, subject
+         type, and closeness result into the prompt template.
       3. _client.messages.create() sends the prompt to Claude and waits
          for the response. max_tokens=1024 caps the response length.
       4. message.content is a list because Claude can return multiple content
@@ -52,20 +58,24 @@ def get_explanation(characters: str, reading: str, guess: str) -> ExplainRespons
 
     Args:
         characters: The kanji compound shown to the user, e.g. '電車'.
-        reading: The correct hiragana reading, e.g. 'でんしゃ'.
+        reading: The primary hiragana reading shown in the result banner.
+        accepted_readings: All readings WaniKani accepts as correct.
         guess: What the user typed (hiragana or romaji).
+        subject_type: 'vocabulary' or 'kanji' -- shapes Claude's explanation.
 
     Returns:
         ExplainResponse with is_correct flag and Claude's explanation.
     """
-    closeness = measure_closeness(guess, reading)
+    closeness = measure_closeness(guess, accepted_readings)
     is_correct = closeness == "correct"
 
     prompt = build_explain_prompt(
         characters=characters,
         reading=reading,
+        accepted_readings=accepted_readings,
         guess=guess,
         closeness=closeness,
+        subject_type=subject_type,
     )
 
     message = _client.messages.create(
