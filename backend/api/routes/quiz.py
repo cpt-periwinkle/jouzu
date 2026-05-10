@@ -9,8 +9,9 @@ parsing, response shaping, error codes). All business logic lives in services/.
 """
 
 import random
+import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend.models.quiz import (
     ExplainRequest,
@@ -20,7 +21,8 @@ from backend.models.quiz import (
     QuizItem,
 )
 from backend.services.claude import get_explanation, get_hint
-from backend.services.quiz import get_quiz_items
+from backend.services.csv_loader import parse_csv
+from backend.services.quiz import get_quiz_items, store_custom_items
 
 # prefix="/quiz" means every route defined on this router is mounted at /quiz/<path>.
 # tags=["quiz"] groups these endpoints together in the auto-generated API docs at /docs.
@@ -28,24 +30,65 @@ router = APIRouter(prefix="/quiz", tags=["quiz"])
 
 
 @router.get("/item", response_model=QuizItem)
-def get_quiz_item(wanikani_token: str | None = None) -> QuizItem:
+def get_quiz_item(
+    wanikani_token: str | None = None,
+    source: str = "fallback",
+    session_id: str | None = None,
+) -> QuizItem:
     """
-    Return a random compound from the active quiz item list.
+    Return a random compound from the selected source.
 
-    Accepts an optional wanikani_token query parameter. When provided, the
-    item is drawn from the user's WaniKani current-level vocabulary and kanji.
-    Without a token, falls back to the hardcoded N4 list.
+    source options:
+      current_level -- WaniKani vocabulary and kanji at the user's current level
+      all_reviewed  -- all WaniKani subjects passed to Guru or above
+      fallback      -- shipped N4 fallback CSV, always available
+      custom        -- user-uploaded CSV, identified by session_id
 
-    In Milestone 5, the source (current level / all reviewed / hardcoded)
-    will be selectable via a separate query parameter.
+    WaniKani sources require wanikani_token. Custom source requires session_id.
+    Falls back to the N4 fallback CSV if the source is unavailable.
 
     Returns 404 if the item list is empty, which should not happen in normal
-    operation but guards against a misconfigured WaniKani token returning nothing.
+    operation but guards against edge cases.
     """
-    items = get_quiz_items(token=wanikani_token)
+    items = get_quiz_items(
+        token=wanikani_token,
+        source=source,
+        session_id=session_id,
+    )
     if not items:
         raise HTTPException(status_code=404, detail="No quiz items available.")
     return random.choice(items)
+
+
+@router.post("/upload")
+async def upload_csv(file: UploadFile = File(...)) -> dict[str, str | int]:
+    """
+    Accept a CSV file upload, parse it into QuizItems, cache it, and return
+    a session_id the frontend uses to reference this deck on subsequent requests.
+
+    Expected CSV format:
+        characters,reading,meaning
+        電車,でんしゃ,train
+
+    Returns the session_id and the number of valid items parsed.
+    """
+    content = await file.read()
+
+    try:
+        items = parse_csv(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if not items:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid items found in CSV. Check that rows have characters, reading, and meaning."
+        )
+
+    session_id = str(uuid.uuid4())
+    store_custom_items(session_id, items)
+
+    return {"session_id": session_id, "item_count": len(items)}
 
 
 @router.post("/explain", response_model=ExplainResponse)

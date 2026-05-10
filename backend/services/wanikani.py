@@ -100,17 +100,61 @@ def get_user_level(token: str) -> int:
     return response.json()["data"]["level"]
 
 
+def _parse_subject(subject: dict) -> QuizItem | None:
+    """
+    Parse a single WaniKani subject dict into a QuizItem.
+
+    Shared by _fetch_subjects and _fetch_subjects_by_ids so parsing logic
+    is not duplicated. Returns None if the subject should be skipped.
+    """
+    subject_id: int = subject["id"]
+    subject_type: str = subject["object"]
+    data = subject["data"]
+
+    if data.get("hidden_at"):
+        return None
+
+    characters: str = data.get("characters", "")
+    if not _has_kanji(characters):
+        return None
+
+    readings = data.get("readings", [])
+    primary_reading = next(
+        (r["reading"] for r in readings if r.get("primary")), None
+    )
+    if not primary_reading:
+        return None
+
+    accepted_readings = [
+        r["reading"] for r in readings if r.get("accepted_answer")
+    ]
+    if not accepted_readings:
+        accepted_readings = [primary_reading]
+
+    meanings = data.get("meanings", [])
+    primary_meaning = next(
+        (m["meaning"] for m in meanings if m.get("primary")), None
+    )
+    if not primary_meaning:
+        return None
+
+    return QuizItem(
+        subject_id=subject_id,
+        characters=characters,
+        reading=primary_reading,
+        accepted_readings=accepted_readings,
+        meaning=primary_meaning,
+        subject_type=subject_type,
+        reading_mnemonic=_strip_markup(data.get("reading_mnemonic")),
+        meaning_mnemonic=_strip_markup(data.get("meaning_mnemonic")),
+    )
+
+
 def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
     """
     Fetch all vocabulary and kanji subjects at the given level from WaniKani.
 
     Follows pagination via pages.next_url until the full list is retrieved.
-    Filters out hidden subjects and kana-only vocabulary (no kanji characters).
-
-    Vocabulary subjects: uses the primary reading as the single accepted reading.
-    Kanji subjects: collects all readings where accepted_answer is True, since
-    WaniKani accepts multiple readings (e.g. both on'yomi and kun'yomi) for kanji.
-    The primary reading is stored as the display reading shown in the result banner.
 
     Args:
         token: The user's WaniKani personal access token.
@@ -130,51 +174,9 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
         payload = response.json()
 
         for subject in payload["data"]:
-            subject_id: int = subject["id"]
-            subject_type: str = subject["object"]
-            data = subject["data"]
-
-            if data.get("hidden_at"):
-                continue
-
-            characters: str = data.get("characters", "")
-
-            if not _has_kanji(characters):
-                continue
-
-            readings = data.get("readings", [])
-
-            primary_reading = next(
-                (r["reading"] for r in readings if r.get("primary")), None
-            )
-            if not primary_reading:
-                continue
-
-            accepted_readings = [
-                r["reading"] for r in readings if r.get("accepted_answer")
-            ]
-            if not accepted_readings:
-                accepted_readings = [primary_reading]
-
-            meanings = data.get("meanings", [])
-            primary_meaning = next(
-                (m["meaning"] for m in meanings if m.get("primary")), None
-            )
-            if not primary_meaning:
-                continue
-
-            items.append(
-                QuizItem(
-                    subject_id=subject_id,
-                    characters=characters,
-                    reading=primary_reading,
-                    accepted_readings=accepted_readings,
-                    meaning=primary_meaning,
-                    subject_type=subject_type,
-                    reading_mnemonic=_strip_markup(data.get("reading_mnemonic")),
-                    meaning_mnemonic=_strip_markup(data.get("meaning_mnemonic")),
-                )
-            )
+            item = _parse_subject(subject)
+            if item:
+                items.append(item)
 
         url = payload["pages"].get("next_url")
 
@@ -278,6 +280,115 @@ def get_items_for_token(token: str) -> list[QuizItem]:
         _subject_cache.set(token, [])
 
     return _subject_cache.get(token) or []
+
+
+def _fetch_passed_subject_ids(token: str) -> list[int]:
+    """
+    Fetch subject IDs for all assignments the user has passed to Guru or above.
+
+    Filters by SRS stages 5-9 (Guru I, Guru II, Master, Enlightened, Burned)
+    and subject types vocabulary and kanji. Returns the subject_id for each
+    matching assignment, handling pagination.
+    """
+    subject_ids: list[int] = []
+    url: str | None = (
+        f"{WANIKANI_BASE_URL}/assignments"
+        f"?srs_stages=5,6,7,8,9&subject_types=vocabulary,kanji"
+    )
+
+    while url:
+        response = httpx.get(url, headers=_headers(token), timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+
+        for assignment in payload["data"]:
+            subject_ids.append(assignment["data"]["subject_id"])
+
+        url = payload["pages"].get("next_url")
+
+    return subject_ids
+
+
+def _fetch_subjects_by_ids(token: str, subject_ids: list[int]) -> list[QuizItem]:
+    """
+    Fetch subjects by specific WaniKani subject IDs.
+
+    Processes IDs in batches of 200 to avoid URL length limits. Uses
+    _parse_subject so filtering and parsing logic is not duplicated.
+
+    Args:
+        token: The user's WaniKani personal access token.
+        subject_ids: The subject IDs to fetch.
+
+    Returns:
+        A list of QuizItems for the requested subjects.
+    """
+    if not subject_ids:
+        return []
+
+    items: list[QuizItem] = []
+    batch_size = 200
+
+    for i in range(0, len(subject_ids), batch_size):
+        batch = subject_ids[i : i + batch_size]
+        ids_str = ",".join(str(sid) for sid in batch)
+        url: str | None = (
+            f"{WANIKANI_BASE_URL}/subjects?ids={ids_str}&types=vocabulary,kanji"
+        )
+
+        while url:
+            response = httpx.get(url, headers=_headers(token), timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+
+            for subject in payload["data"]:
+                item = _parse_subject(subject)
+                if item:
+                    items.append(item)
+
+            url = payload["pages"].get("next_url")
+
+    return items
+
+
+# Separate cache for all-reviewed subjects so it doesn't overwrite the
+# current-level cache when both sources are used in the same session.
+_reviewed_cache: CacheProvider[list[QuizItem]] = InMemoryCache()
+
+
+def get_all_reviewed_subjects(token: str) -> list[QuizItem]:
+    """
+    Return all vocabulary and kanji subjects the user has passed to Guru or above.
+
+    Fetches passed assignment subject IDs, then fetches those subjects with
+    review stats embedded. Results are cached by token.
+
+    Args:
+        token: The user's WaniKani personal access token.
+
+    Returns:
+        A list of QuizItems from all reviewed subjects, or empty on failure.
+    """
+    if _reviewed_cache.contains(token):
+        return _reviewed_cache.get(token) or []
+
+    try:
+        subject_ids = _fetch_passed_subject_ids(token)
+        items = _fetch_subjects_by_ids(token, subject_ids)
+
+        review_stats = _fetch_review_stats(token, subject_ids)
+        items = [
+            item.model_copy(
+                update={"review_stats": review_stats.get(item.subject_id)}
+            )
+            for item in items
+        ]
+
+        _reviewed_cache.set(token, items)
+    except Exception:
+        _reviewed_cache.set(token, [])
+
+    return _reviewed_cache.get(token) or []
 
 
 def get_character_list(token: str) -> list[str]:

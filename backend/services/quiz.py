@@ -1,89 +1,113 @@
 """
 Quiz service.
 
-Owns the compound data and guess-evaluation logic.
-The rest of the app calls get_quiz_items() without caring where the data
-comes from -- this is the only file that changes when WaniKani is added.
+Routes item requests to the correct source (WaniKani current level, WaniKani
+all reviewed, N4 fallback CSV, or custom uploaded CSV) and owns guess-evaluation
+logic. The rest of the app calls get_quiz_items() without caring where the
+data comes from.
 """
+
+from pathlib import Path
 
 import pykakasi
 
-# QuizItem is the Pydantic model from models/quiz.py that defines the shape
-# each compound must match: characters (kanji), reading (hiragana), meaning (English).
+from backend.core.cache import CacheProvider, InMemoryCache
 from backend.models.quiz import QuizItem
+from backend.services.csv_loader import load_csv
+
+# ---------------------------------------------------------------------------
+# Fallback deck
+#
+# Loaded once on module import from the shipped CSV. Fails loudly if the file
+# is missing -- this is a configuration error, not a runtime condition.
+# ---------------------------------------------------------------------------
+
+_FALLBACK_CSV = Path(__file__).parent.parent.parent / "data" / "n4_fallback.csv"
+
+try:
+    _FALLBACK_ITEMS: list[QuizItem] = load_csv(_FALLBACK_CSV)
+except Exception as exc:
+    raise RuntimeError(
+        f"Failed to load N4 fallback CSV from {_FALLBACK_CSV}: {exc}"
+    ) from exc
 
 
-# pykakasi is initialized once when Python first imports this file, not on every
-# function call. Initialization is slow; calling .convert() on an existing instance
-# is fast. The underscore prefix means this is private -- nothing outside this
-# file should use it directly.
+# ---------------------------------------------------------------------------
+# Custom upload cache
+#
+# Keyed by session_id (UUID) returned to the frontend after upload.
+# Uses the same CacheProvider abstraction as the WaniKani subject cache.
+# ---------------------------------------------------------------------------
+
+_custom_cache: CacheProvider[list[QuizItem]] = InMemoryCache()
+
+
+def store_custom_items(session_id: str, items: list[QuizItem]) -> None:
+    """Store a parsed custom deck under the given session ID."""
+    _custom_cache.set(session_id, items)
+
+
+def get_custom_items(session_id: str) -> list[QuizItem]:
+    """Return the custom deck for the given session ID, or empty list if not found."""
+    return _custom_cache.get(session_id) or []
+
+
+# ---------------------------------------------------------------------------
+# pykakasi (initialized once for reuse across all conversion calls)
+# ---------------------------------------------------------------------------
+
 _kakasi = pykakasi.kakasi()
 
 
-# 20 N4-level compounds covering the four main reading patterns:
-#
-#   on+on  : both kanji use on'yomi (Chinese-derived reading).
-#            Most compound nouns follow this pattern, e.g. 電車 (でんしゃ).
-#   kun+kun: both kanji use kun'yomi (native Japanese reading), e.g. 手紙 (てがみ).
-#   on+kun : first kanji on'yomi, second kun'yomi. Called 湯桶読み (yutou-yomi).
-#   kun+on : first kanji kun'yomi, second on'yomi. Called 重箱読み (juubako-yomi).
-#   irreg  : irregular reading that does not follow any standard pattern.
-#
-# ALL_CAPS signals this is a constant that should not be reassigned.
-# The underscore prefix makes it private to this file.
-# Hardcoded items are all vocabulary -- accepted_readings matches reading since
-# vocabulary subjects have one primary reading.
+# ---------------------------------------------------------------------------
+# Public interface
+# ---------------------------------------------------------------------------
 
-_HARDCODED_ITEMS: list[QuizItem] = [
-    # on + on
-    QuizItem(characters="電車", reading="でんしゃ", accepted_readings=["でんしゃ"], meaning="train", subject_type="vocabulary"),
-    QuizItem(characters="学生", reading="がくせい", accepted_readings=["がくせい"], meaning="student", subject_type="vocabulary"),
-    QuizItem(characters="食堂", reading="しょくどう", accepted_readings=["しょくどう"], meaning="cafeteria", subject_type="vocabulary"),
-    QuizItem(characters="旅行", reading="りょこう", accepted_readings=["りょこう"], meaning="travel", subject_type="vocabulary"),
-    QuizItem(characters="音楽", reading="おんがく", accepted_readings=["おんがく"], meaning="music", subject_type="vocabulary"),
-    QuizItem(characters="病院", reading="びょういん", accepted_readings=["びょういん"], meaning="hospital", subject_type="vocabulary"),
-    QuizItem(characters="図書館", reading="としょかん", accepted_readings=["としょかん"], meaning="library", subject_type="vocabulary"),
-    QuizItem(characters="電話", reading="でんわ", accepted_readings=["でんわ"], meaning="telephone", subject_type="vocabulary"),
-    # kun + kun
-    QuizItem(characters="手紙", reading="てがみ", accepted_readings=["てがみ"], meaning="letter", subject_type="vocabulary"),
-    QuizItem(characters="花火", reading="はなび", accepted_readings=["はなび"], meaning="fireworks", subject_type="vocabulary"),
-    QuizItem(characters="夕方", reading="ゆうがた", accepted_readings=["ゆうがた"], meaning="evening", subject_type="vocabulary"),
-    QuizItem(characters="山道", reading="やまみち", accepted_readings=["やまみち"], meaning="mountain path", subject_type="vocabulary"),
-    # on + kun  (yutou-yomi)
-    QuizItem(characters="台所", reading="だいどころ", accepted_readings=["だいどころ"], meaning="kitchen", subject_type="vocabulary"),
-    QuizItem(characters="気持ち", reading="きもち", accepted_readings=["きもち"], meaning="feeling", subject_type="vocabulary"),
-    # kun + on  (juubako-yomi)
-    QuizItem(characters="場所", reading="ばしょ", accepted_readings=["ばしょ"], meaning="place", subject_type="vocabulary"),
-    QuizItem(characters="合図", reading="あいず", accepted_readings=["あいず"], meaning="signal", subject_type="vocabulary"),
-    # irregular
-    QuizItem(characters="今日", reading="きょう", accepted_readings=["きょう"], meaning="today", subject_type="vocabulary"),
-    QuizItem(characters="昨日", reading="きのう", accepted_readings=["きのう"], meaning="yesterday", subject_type="vocabulary"),
-    QuizItem(characters="大人", reading="おとな", accepted_readings=["おとな"], meaning="adult", subject_type="vocabulary"),
-    QuizItem(characters="二人", reading="ふたり", accepted_readings=["ふたり"], meaning="two people", subject_type="vocabulary"),
-]
-
-
-def get_quiz_items(token: str | None = None) -> list[QuizItem]:
+def get_quiz_items(
+    token: str | None = None,
+    source: str = "fallback",
+    session_id: str | None = None,
+) -> list[QuizItem]:
     """
-    Return the list of compounds available for the current quiz session.
+    Return the list of compounds for the current quiz session.
 
-    If a WaniKani token is provided, fetches the user's current level vocabulary
-    and kanji from WaniKani and returns that. Falls back to the hardcoded N4 list
-    if no token is given, the token is invalid, or the WaniKani call returns nothing.
+    Routes to the correct source based on the source parameter:
+      current_level -- WaniKani vocabulary and kanji at the user's current level
+      all_reviewed  -- all WaniKani subjects the user has passed to Guru or above
+      fallback      -- shipped N4 fallback CSV, always available, no token needed
+      custom        -- user-uploaded CSV, identified by session_id
+
+    Falls back to the N4 fallback CSV if the requested source is unavailable
+    (missing token, empty result, missing session_id, etc.).
 
     Args:
-        token: Optional WaniKani personal access token.
+        token: WaniKani personal access token. Required for WaniKani sources.
+        source: One of 'current_level', 'all_reviewed', 'fallback', 'custom'.
+        session_id: UUID identifying a custom uploaded deck. Required for 'custom'.
 
     Returns:
-        A list of QuizItems from WaniKani, or the hardcoded N4 fallback.
+        A list of QuizItems from the selected source, or the fallback list.
     """
-    if token:
+    if source == "current_level" and token:
         from backend.services.wanikani import get_items_for_token
         items = get_items_for_token(token)
-        if items:
-            return items
-    return _HARDCODED_ITEMS
+        return items if items else _FALLBACK_ITEMS
 
+    if source == "all_reviewed" and token:
+        from backend.services.wanikani import get_all_reviewed_subjects
+        items = get_all_reviewed_subjects(token)
+        return items if items else _FALLBACK_ITEMS
+
+    if source == "custom" and session_id:
+        items = get_custom_items(session_id)
+        return items if items else _FALLBACK_ITEMS
+
+    return _FALLBACK_ITEMS
+
+
+# ---------------------------------------------------------------------------
+# Guess evaluation
+# ---------------------------------------------------------------------------
 
 def _hiragana_to_romaji(text: str) -> str:
     """

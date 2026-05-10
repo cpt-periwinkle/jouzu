@@ -33,15 +33,24 @@ import streamlit as st
 # so the frontend knows where the deployed backend lives.
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
+# Source options shown in the dropdown.
+# Keys match the source parameter the backend expects.
+SOURCE_OPTIONS = {
+    "current_level": "WaniKani current level",
+    "all_reviewed":  "WaniKani all reviewed",
+    "fallback":      "N4 fallback",
+    "custom":        "Upload your own",
+}
+
 # Human-readable labels for pattern codes returned by Claude.
 PATTERN_LABELS: dict[str, str] = {
-    "on+on":    "On+On (both on'yomi)",
-    "kun+kun":  "Kun+Kun (both kun'yomi)",
-    "on+kun":   "On+Kun (yutou-yomi)",
-    "kun+on":   "Kun+On (juubako-yomi)",
+    "on+on":     "On+On (both on'yomi)",
+    "kun+kun":   "Kun+Kun (both kun'yomi)",
+    "on+kun":    "On+Kun (yutou-yomi)",
+    "kun+on":    "Kun+On (juubako-yomi)",
     "irregular": "Irregular",
-    "single":   "Single kanji",
-    "mixed":    "Mixed (3+ kanji)",
+    "single":    "Single kanji",
+    "mixed":     "Mixed (3+ kanji)",
 }
 
 
@@ -54,10 +63,10 @@ def _fresh_session_stats() -> dict:
     return {
         "attempted": 0,
         "correct": 0,
-        "pattern_hits": {},    # {pattern: count}
-        "pattern_misses": {},  # {pattern: count}
-        "missed_compounds": [], # list of characters strings
-        "stats_updated": False, # guard against double-counting on reruns
+        "pattern_hits": {},
+        "pattern_misses": {},
+        "missed_compounds": [],
+        "stats_updated": False,
     }
 
 
@@ -73,14 +82,19 @@ def _init_state() -> None:
         st.session_state.hint = None
     if "session_stats" not in st.session_state:
         st.session_state.session_stats = _fresh_session_stats()
+    if "source" not in st.session_state:
+        st.session_state.source = "fallback"
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = None
 
 
 def _reset_session() -> None:
     """
-    Reset all session state. Called when the WaniKani token changes.
+    Reset all quiz and stats state. Called when token or source changes.
 
-    A new token means a different WaniKani account and vocabulary list --
-    keeping old session stats would mix data across accounts.
+    A token change means a different WaniKani account. A source change means
+    a different item pool. Either way, mixing old session stats with new items
+    would be misleading.
     """
     st.session_state.current_item = None
     st.session_state.result = None
@@ -92,12 +106,18 @@ def _load_new_item() -> None:
     """
     Fetch a random quiz item from the backend and reset result and hint state.
 
-    Passes the WaniKani token as a query parameter if one is set.
-    The first call with a new token will be slow (~2-5s) while the backend
-    fetches and caches the WaniKani subjects and review stats.
+    Passes wanikani_token, source, and session_id as query parameters.
+    The backend routes to the correct source and returns a random item.
+    The first call with a new WaniKani token will be slow while the backend
+    fetches and caches subjects and review stats.
     """
-    token = st.session_state.wanikani_token
-    params = {"wanikani_token": token} if token else {}
+    params: dict = {"source": st.session_state.source}
+
+    if st.session_state.wanikani_token:
+        params["wanikani_token"] = st.session_state.wanikani_token
+
+    if st.session_state.session_id:
+        params["session_id"] = st.session_state.session_id
 
     try:
         response = requests.get(
@@ -109,7 +129,6 @@ def _load_new_item() -> None:
         st.session_state.current_item = response.json()
         st.session_state.result = None
         st.session_state.hint = None
-        # Reset the guard so stats are updated once for the new item.
         st.session_state.session_stats["stats_updated"] = False
     except requests.exceptions.ConnectionError:
         st.error("Cannot reach the backend. Is `uvicorn backend.main:app --reload` running?")
@@ -162,13 +181,34 @@ def _fetch_hint() -> None:
         st.stop()
 
 
+def _upload_csv(file) -> None:
+    """
+    POST an uploaded CSV file to /quiz/upload and store the returned session_id.
+
+    The session_id is then passed on every GET /quiz/item call so the backend
+    knows which custom deck to draw from.
+    """
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/quiz/upload",
+            files={"file": (file.name, file.getvalue(), "text/csv")},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        st.session_state.session_id = data["session_id"]
+        st.success(f"Uploaded {data['item_count']} compounds.")
+        _reset_session()
+    except requests.exceptions.HTTPError as exc:
+        st.error(f"Upload failed: {exc.response.json().get('detail', 'Unknown error')}")
+    except requests.exceptions.ConnectionError:
+        st.error("Cannot reach the backend. Is `uvicorn backend.main:app --reload` running?")
+
+
 def _update_session_stats(item: dict, result: dict) -> None:
     """
-    Update session stats after a submission. Called once per round.
-
-    Uses stats_updated as a guard so Streamlit reruns don't double-count.
-    Pattern is extracted from Claude's response and used to track which
-    reading patterns the user is strong or weak on this session.
+    Update session stats after a submission. Called once per round via the
+    stats_updated guard to prevent double-counting on Streamlit reruns.
     """
     if st.session_state.session_stats["stats_updated"]:
         return
@@ -196,14 +236,14 @@ def _update_session_stats(item: dict, result: dict) -> None:
 
 def _render_sidebar() -> None:
     """
-    Render the sidebar: WaniKani settings (collapsible) and session stats.
+    Render the sidebar: WaniKani settings, source selection, and session stats.
 
-    The token input is inside an expander so it collapses once set.
-    The expander starts open if no token is set, closed if one is active.
+    WaniKani settings collapse once a token is set. Source dropdown sits below.
+    File uploader appears only when 'custom' source is selected.
     """
     with st.sidebar:
 
-        # WaniKani Settings -- collapsed once token is set.
+        # WaniKani Settings -- collapses once token is set.
         with st.expander(
             "WaniKani Settings",
             expanded=not bool(st.session_state.wanikani_token),
@@ -219,21 +259,64 @@ def _render_sidebar() -> None:
                 placeholder="Paste your token here",
                 key="token_input",
             )
-
-            # Any token change (new value or cleared) resets the full session.
             if token != st.session_state.wanikani_token:
                 st.session_state.wanikani_token = token
+                # Reset to fallback if WaniKani token is removed.
+                if not token and st.session_state.source in ("current_level", "all_reviewed"):
+                    st.session_state.source = "fallback"
                 _reset_session()
 
         if st.session_state.wanikani_token:
             st.success("Connected to WaniKani")
         else:
-            st.info("Using hardcoded N4 fallback")
+            st.info("No WaniKani token -- WaniKani sources unavailable")
 
-        # Session stats -- only shown once the user has attempted something.
+        st.divider()
+
+        # Source selection dropdown.
+        # WaniKani sources are disabled (shown but won't work) without a token.
+        has_token = bool(st.session_state.wanikani_token)
+        available_sources = {
+            k: v + (" ⚠ token required" if k in ("current_level", "all_reviewed") and not has_token else "")
+            for k, v in SOURCE_OPTIONS.items()
+        }
+
+        selected_label = st.selectbox(
+            "Quiz source",
+            options=list(available_sources.values()),
+            index=list(available_sources.keys()).index(st.session_state.source),
+        )
+        selected_source = [k for k, v in available_sources.items() if v == selected_label][0]
+
+        if selected_source != st.session_state.source:
+            st.session_state.source = selected_source
+            st.session_state.session_id = None
+            _reset_session()
+
+        # File uploader -- only shown when custom source is selected.
+        if st.session_state.source == "custom":
+            st.caption(
+                "Upload a CSV with columns: `characters`, `reading`, `meaning`. "
+                "Save the file as UTF-8 encoding. "
+                "Bogus readings, non-Japanese characters, or wrong meanings will produce "
+                "inaccurate Claude explanations -- garbage in, garbage out."
+            )
+            uploaded = st.file_uploader("Choose a CSV file", type="csv")
+            # Only upload when a new file arrives. Streamlit reruns the script
+            # on every interaction -- comparing name and size guards against
+            # re-uploading the same file on each rerun. React won't need this
+            # guard since it only fires the upload event once naturally.
+            if uploaded:
+                file_key = f"{uploaded.name}:{uploaded.size}"
+                if st.session_state.get("last_uploaded_key") != file_key:
+                    st.session_state.last_uploaded_key = file_key
+                    _upload_csv(uploaded)
+
+        st.divider()
+
+        # Session stats -- shown once the user has attempted something.
         stats = st.session_state.session_stats
         if stats["attempted"] > 0:
-            st.divider()
             st.subheader("This Session")
 
             accuracy = stats["correct"] / stats["attempted"] * 100
@@ -241,7 +324,6 @@ def _render_sidebar() -> None:
             col1.metric("Attempted", stats["attempted"])
             col2.metric("Accuracy", f"{accuracy:.0f}%")
 
-            # Pattern breakdown -- shows which patterns you're strong or weak on.
             all_patterns = set(
                 list(stats["pattern_hits"].keys()) +
                 list(stats["pattern_misses"].keys())
@@ -254,11 +336,9 @@ def _render_sidebar() -> None:
                     total = hits + misses
                     label = PATTERN_LABELS.get(pattern, pattern)
                     accuracy_pct = int(hits / total * 100) if total else 0
-                    # Color signal: green if all correct, red if any missed.
                     icon = "✓" if misses == 0 else ("⚠" if hits > 0 else "✗")
                     st.markdown(f"{icon} **{label}** {hits}/{total} ({accuracy_pct}%)")
 
-            # Missed compounds list -- feeds into Milestone 7 drill mode.
             if stats["missed_compounds"]:
                 st.markdown("**Missed this session**")
                 st.markdown("、".join(stats["missed_compounds"]))
@@ -283,6 +363,17 @@ def main() -> None:
 
     st.title("Jouzu 上手")
     st.caption("Kanji reading drill -- learn the patterns, not just the answers.")
+    st.caption("⚠ Powered by Claude (Anthropic). Explanations may occasionally be inaccurate -- treat them as a study aid, not a dictionary.")
+
+    # Warn if a WaniKani source is selected without a token.
+    if st.session_state.source in ("current_level", "all_reviewed") and not st.session_state.wanikani_token:
+        st.warning("A WaniKani token is required for this source. Add one in the sidebar or switch to N4 fallback.")
+        st.stop()
+
+    # Warn if custom source is selected but no file has been uploaded yet.
+    if st.session_state.source == "custom" and not st.session_state.session_id:
+        st.info("Upload a CSV file in the sidebar to start drilling your own deck.")
+        st.stop()
 
     if st.session_state.current_item is None:
         with st.spinner("Fetching vocabulary..."):
@@ -291,7 +382,6 @@ def main() -> None:
     item = st.session_state.current_item
     result = st.session_state.result
 
-    # Update session stats once when the result first appears.
     if result is not None:
         _update_session_stats(item, result)
 
@@ -310,7 +400,6 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # Hide meaning behind expander before submission; show it plainly after.
     if result:
         st.markdown(
             f"<p style='text-align:center; color:gray;'>{item['meaning']}</p>",
@@ -364,7 +453,6 @@ def main() -> None:
         else:
             st.error(f"Not quite. The correct reading is {reading}")
 
-        # WaniKani lifetime stats for this specific compound.
         review_stats = item.get("review_stats")
         if review_stats:
             col1, col2, col3 = st.columns(3)
