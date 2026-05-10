@@ -46,16 +46,15 @@ def _init_state() -> None:
         st.session_state.result = None
     if "wanikani_token" not in st.session_state:
         st.session_state.wanikani_token = ""
+    if "hint" not in st.session_state:
+        st.session_state.hint = None
 
 
 def _load_new_item() -> None:
     """
-    Fetch a random quiz item from the backend and reset result state.
+    Fetch a random quiz item from the backend and reset result and hint state.
 
     Passes the WaniKani token as a query parameter if one is set.
-    The backend uses it to draw from WaniKani vocabulary; without it,
-    falls back to the hardcoded N4 list.
-
     The first call with a new token will be slow (~2-5s) while the backend
     fetches and caches the WaniKani subjects. Subsequent calls are fast.
     """
@@ -66,11 +65,12 @@ def _load_new_item() -> None:
         response = requests.get(
             f"{API_BASE_URL}/quiz/item",
             params=params,
-            timeout=20,  # extra time for first WaniKani fetch
+            timeout=20,
         )
         response.raise_for_status()
         st.session_state.current_item = response.json()
         st.session_state.result = None
+        st.session_state.hint = None
     except requests.exceptions.ConnectionError:
         st.error("Cannot reach the backend. Is `uvicorn backend.main:app --reload` running?")
         st.stop()
@@ -79,6 +79,7 @@ def _load_new_item() -> None:
 def _submit_guess(guess: str) -> None:
     """POST the guess to /quiz/explain and store the result in session state."""
     item = st.session_state.current_item
+    token = st.session_state.wanikani_token
     try:
         response = requests.post(
             f"{API_BASE_URL}/quiz/explain",
@@ -88,11 +89,34 @@ def _submit_guess(guess: str) -> None:
                 "accepted_readings": item["accepted_readings"],
                 "guess": guess,
                 "subject_type": item.get("subject_type", "vocabulary"),
+                "reading_mnemonic": item.get("reading_mnemonic"),
+                "wanikani_token": token if token else None,
             },
-            timeout=30,  # Claude needs time to respond
+            timeout=30,
         )
         response.raise_for_status()
         st.session_state.result = response.json()
+    except requests.exceptions.ConnectionError:
+        st.error("Cannot reach the backend. Is `uvicorn backend.main:app --reload` running?")
+        st.stop()
+
+
+def _fetch_hint() -> None:
+    """POST to /quiz/hint and store the hint text in session state."""
+    item = st.session_state.current_item
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/quiz/hint",
+            json={
+                "characters": item["characters"],
+                "meaning": item["meaning"],
+                "subject_type": item.get("subject_type", "vocabulary"),
+                "reading_mnemonic": item.get("reading_mnemonic"),
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        st.session_state.hint = response.json()["hint"]
     except requests.exceptions.ConnectionError:
         st.error("Cannot reach the backend. Is `uvicorn backend.main:app --reload` running?")
         st.stop()
@@ -122,12 +146,11 @@ def _render_sidebar() -> None:
             key="token_input",
         )
 
-        # If the token has changed, clear the current item so the next
-        # load picks from the new source (WaniKani or hardcoded fallback).
         if token != st.session_state.wanikani_token:
             st.session_state.wanikani_token = token
             st.session_state.current_item = None
             st.session_state.result = None
+            st.session_state.hint = None
 
         st.divider()
 
@@ -146,8 +169,9 @@ def main() -> None:
     Main UI function, called on every rerun.
 
     Two states driven by st.session_state.result:
-      None     -- show compound, input field, Submit + Skip
-      not None -- show closeness feedback, Claude's explanation, Next button
+      None     -- show compound, input field, Hint + Submit + Skip
+      not None -- show closeness feedback, Claude's explanation,
+                  WaniKani mnemonics, Next button
     """
     st.set_page_config(page_title="Jouzu", page_icon="上", layout="centered")
     _init_state()
@@ -196,7 +220,7 @@ def main() -> None:
             key="guess_input",
         )
 
-        col1, col2 = st.columns([1, 1])
+        col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
             if st.button("Submit", use_container_width=True, type="primary"):
                 if guess.strip():
@@ -205,9 +229,18 @@ def main() -> None:
                 else:
                     st.warning("Type a reading before submitting.")
         with col2:
+            if st.button("Hint", use_container_width=True):
+                with st.spinner("Thinking..."):
+                    _fetch_hint()
+                st.rerun()
+        with col3:
             if st.button("Skip", use_container_width=True):
                 _load_new_item()
                 st.rerun()
+
+        # Show hint below input if one has been fetched.
+        if st.session_state.hint:
+            st.info(st.session_state.hint)
 
     # --- State 2: result ---
     else:
@@ -225,6 +258,16 @@ def main() -> None:
 
         st.divider()
         st.markdown(result["explanation"])
+
+        # WaniKani mnemonics -- collapsible so they don't dominate the result.
+        if item.get("reading_mnemonic"):
+            with st.expander("WaniKani reading mnemonic"):
+                st.write(item["reading_mnemonic"])
+
+        if item.get("meaning_mnemonic"):
+            with st.expander("WaniKani meaning mnemonic"):
+                st.write(item["meaning_mnemonic"])
+
         st.divider()
 
         if st.button("Next compound", use_container_width=True, type="primary"):

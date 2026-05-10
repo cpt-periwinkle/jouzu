@@ -12,8 +12,14 @@ import random
 
 from fastapi import APIRouter, HTTPException
 
-from backend.models.quiz import ExplainRequest, ExplainResponse, QuizItem
-from backend.services.claude import get_explanation
+from backend.models.quiz import (
+    ExplainRequest,
+    ExplainResponse,
+    HintRequest,
+    HintResponse,
+    QuizItem,
+)
+from backend.services.claude import get_explanation, get_hint
 from backend.services.quiz import get_quiz_items
 
 # prefix="/quiz" means every route defined on this router is mounted at /quiz/<path>.
@@ -27,8 +33,8 @@ def get_quiz_item(wanikani_token: str | None = None) -> QuizItem:
     Return a random compound from the active quiz item list.
 
     Accepts an optional wanikani_token query parameter. When provided, the
-    item is drawn from the user's WaniKani current-level vocabulary. Without
-    a token, falls back to the hardcoded N4 list.
+    item is drawn from the user's WaniKani current-level vocabulary and kanji.
+    Without a token, falls back to the hardcoded N4 list.
 
     In Milestone 5, the source (current level / all reviewed / hardcoded)
     will be selectable via a separate query parameter.
@@ -57,4 +63,22 @@ def explain(request: ExplainRequest) -> ExplainResponse:
         accepted_readings=request.accepted_readings,
         guess=request.guess,
         subject_type=request.subject_type,
+        reading_mnemonic=request.reading_mnemonic,
+        wanikani_token=request.wanikani_token,
+    )
+
+
+@router.post("/hint", response_model=HintResponse)
+def hint(request: HintRequest) -> HintResponse:
+    """
+    Return a hint that nudges the student toward the reading without revealing it.
+
+    Delegates to services/claude.py. The reading is intentionally not included
+    in HintRequest -- Claude cannot reveal what it doesn't receive.
+    """
+    return get_hint(
+        characters=request.characters,
+        meaning=request.meaning,
+        subject_type=request.subject_type,
+        reading_mnemonic=request.reading_mnemonic,
     )

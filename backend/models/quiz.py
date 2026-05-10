@@ -27,6 +27,12 @@ class QuizItem(BaseModel):
     subject_type: str
     """WaniKani subject type: 'vocabulary' or 'kanji'."""
 
+    reading_mnemonic: str | None = None
+    """WaniKani's mnemonic for remembering the reading. May contain markup tags."""
+
+    meaning_mnemonic: str | None = None
+    """WaniKani's mnemonic for remembering the meaning. May contain markup tags."""
+
 
 class ExplainRequest(BaseModel):
     """Payload sent by the frontend when the user submits a guess."""
@@ -46,6 +52,13 @@ class ExplainRequest(BaseModel):
     subject_type: str
     """WaniKani subject type: 'vocabulary' or 'kanji'."""
 
+    reading_mnemonic: str | None = None
+    """WaniKani's reading mnemonic, passed to Claude for reference."""
+
+    wanikani_token: str | None = None
+    """Optional token used to pull the user's vocabulary list for personalised
+    related compound suggestions."""
+
 
 class ExplainResponse(BaseModel):
     """Response returned after evaluating a guess and calling Claude."""
@@ -58,3 +71,26 @@ class ExplainResponse(BaseModel):
 
     explanation: str
     """Claude's pattern explanation for this compound."""
+
+
+class HintRequest(BaseModel):
+    """Payload sent by the frontend when the user requests a hint."""
+
+    characters: str
+    """The kanji compound being quizzed."""
+
+    meaning: str
+    """The English meaning -- Claude can reference this without spoiling the reading."""
+
+    subject_type: str
+    """WaniKani subject type: 'vocabulary' or 'kanji'."""
+
+    reading_mnemonic: str | None = None
+    """WaniKani's reading mnemonic. Claude can nudge toward it without quoting it."""
+
+
+class HintResponse(BaseModel):
+    """A nudge toward the correct reading without revealing it."""
+
+    hint: str
+    """Claude's hint -- guides the student toward the pattern, not the answer."""

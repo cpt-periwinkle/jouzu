@@ -1,16 +1,17 @@
 """
-LLM prompt templates for the quiz domain.
+LLM prompt builders for the quiz domain.
 
-Each function returns a fully-formatted prompt string ready to send to Claude.
-Isolated here so prompts can be iterated without touching service or route logic.
+Each function assembles the dynamic sections of a prompt (conditional lines,
+flavor messages, vocabulary lists) and injects them into the templates defined
+in templates.py via .format(). The static structure lives there; the logic lives here.
 """
 
 import random
 
+from backend.prompts.templates import EXPLAIN_TEMPLATE, HINT_TEMPLATE
+
 # Flavor lines passed to Claude as result context.
 # Claude uses the tone of these to naturally vary its response.
-# Japanese exclamations are used where they fit -- not forced on every line.
-
 _CORRECT_FLAVOR = [
     "正解! That's the one.",
     "そうそう! You read that perfectly.",
@@ -47,13 +48,6 @@ def _pick_flavor(closeness: str, reading: str) -> str:
 
     For incorrect answers, appends the correct reading so Claude always
     has it in context when writing the explanation.
-
-    Args:
-        closeness: One of 'correct', 'very_close', 'close', or 'off'.
-        reading: The correct hiragana reading, appended for incorrect answers.
-
-    Returns:
-        A flavor string to embed in the prompt.
     """
     if closeness == "correct":
         return random.choice(_CORRECT_FLAVOR)
@@ -75,14 +69,12 @@ def build_explain_prompt(
     guess: str,
     closeness: str,
     subject_type: str,
+    reading_mnemonic: str | None = None,
+    known_vocabulary: list[str] | None = None,
 ) -> str:
     """
-    Build the explanation prompt for a submitted quiz guess.
-
-    Gives Claude a consistent tutor persona and passes closeness context
-    so the explanation tone matches how well the student did. Subject type
-    shapes the explanation -- kanji and vocabulary have different pattern rules
-    and kanji may have multiple accepted readings worth noting.
+    Build the explanation prompt by assembling dynamic sections and injecting
+    them into EXPLAIN_TEMPLATE.
 
     Args:
         characters: The kanji compound shown to the user, e.g. '電車'.
@@ -91,18 +83,20 @@ def build_explain_prompt(
         guess: What the user typed (hiragana or romaji).
         closeness: One of 'correct', 'very_close', 'close', or 'off'.
         subject_type: 'vocabulary' or 'kanji'.
+        reading_mnemonic: WaniKani's reading mnemonic, if available.
+        known_vocabulary: List of kanji compounds the student knows, used to
+            suggest relevant related compounds.
 
     Returns:
-        A formatted prompt string ready to send to Claude.
+        A fully formatted prompt string ready to send to Claude.
     """
     result_line = _pick_flavor(closeness, reading)
 
-    # Tell Claude about all accepted readings when there are multiple,
-    # so it can reference them in the explanation.
-    if len(accepted_readings) > 1:
-        readings_line = f"Accepted readings: {', '.join(accepted_readings)}"
-    else:
-        readings_line = f"Correct reading: {reading}"
+    readings_line = (
+        f"Accepted readings: {', '.join(accepted_readings)}"
+        if len(accepted_readings) > 1
+        else f"Correct reading: {reading}"
+    )
 
     type_context = (
         "This is a kanji subject. WaniKani may accept multiple readings (on'yomi and/or kun'yomi). "
@@ -112,36 +106,61 @@ def build_explain_prompt(
         else "This is a vocabulary subject. It has one expected reading in context."
     )
 
-    return f"""You are a sharp, fun and encouraging Japanese tutor helping a student prepare for the JLPT N4.
-You are direct and don't pad your explanations with filler. You use Japanese naturally when it fits
--- a 惜しい here, a そうそう there -- but you don't force it. Your goal is to help the student
-internalize reading patterns so they can predict new compounds they've never seen before.
+    mnemonic_section = (
+        f"\nWaniKani's reading mnemonic for this subject: {reading_mnemonic}"
+        if reading_mnemonic
+        else ""
+    )
 
-The student saw the compound: {characters}
-{readings_line}
-Student's guess: {guess}
-Result: {result_line}
-Subject type: {type_context}
+    # Pass up to 50 known compounds to keep token count reasonable.
+    vocab_section = (
+        f"\nThe student's known vocabulary includes: {', '.join(known_vocabulary[:50])}. "
+        "When suggesting related compounds in section 3, prefer ones from this list "
+        "over ones the student may not know yet."
+        if known_vocabulary
+        else ""
+    )
 
-Respond in exactly this structure:
+    return EXPLAIN_TEMPLATE.format(
+        characters=characters,
+        readings_line=readings_line,
+        guess=guess,
+        result_line=result_line,
+        type_context=type_context,
+        mnemonic_section=mnemonic_section,
+        vocab_section=vocab_section,
+    )
 
-1. Reading breakdown
-   Show how the reading splits across each kanji. For each kanji, state whether it uses on'yomi
-   (Chinese-derived reading) or kun'yomi (native Japanese reading), and give the specific reading
-   for that kanji. For kanji subjects, note all accepted readings.
 
-2. Pattern explanation
-   Explain why this compound uses these readings. Reference the general pattern it follows.
-   For kanji subjects, mention the component radicals and how they connect to WaniKani's mnemonics.
-   If the student was close, acknowledge what they got right before explaining the slip.
-   If they were way off, focus on the pattern without dwelling on the mistake.
+def build_hint_prompt(
+    characters: str,
+    meaning: str,
+    subject_type: str,
+    reading_mnemonic: str | None = None,
+) -> str:
+    """
+    Build a hint prompt by injecting dynamic sections into HINT_TEMPLATE.
 
-3. Related compounds
-   List 2-3 other common N4-level compounds that follow the same reading pattern.
-   Show the kanji, reading in hiragana, and meaning.
+    Args:
+        characters: The kanji compound being quizzed.
+        meaning: The English meaning.
+        subject_type: 'vocabulary' or 'kanji'.
+        reading_mnemonic: WaniKani's reading mnemonic. Claude can allude
+            to it without quoting it directly.
 
-4. Exceptions or notes (only if relevant)
-   If this compound has an irregular reading or a common exception worth knowing, note it here.
-   Skip this section entirely if there is nothing unusual.
+    Returns:
+        A fully formatted prompt string ready to send to Claude.
+    """
+    mnemonic_section = (
+        f"\nWaniKani's reading mnemonic for this subject: {reading_mnemonic}"
+        "\nYou may allude to the mnemonic to guide the student, but don't quote it directly."
+        if reading_mnemonic
+        else ""
+    )
 
-Keep it tight. The student reads this after every round -- don't make it a wall of text."""
+    return HINT_TEMPLATE.format(
+        characters=characters,
+        meaning=meaning,
+        subject_type=subject_type,
+        mnemonic_section=mnemonic_section,
+    )

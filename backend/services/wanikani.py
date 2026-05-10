@@ -1,18 +1,54 @@
 """
 WaniKani API client.
 
-Fetches vocabulary subjects for a user's current level and converts them
-into QuizItems. Results are cached in memory by token so WaniKani is only
+Fetches vocabulary and kanji subjects for a user's current level and converts
+them into QuizItems. Results are cached via CacheProvider so WaniKani is only
 called once per token per server session -- not on every quiz round.
 
 All functions that make network calls raise httpx.HTTPStatusError on
 non-2xx responses. Callers are responsible for handling those errors.
+
+FUTURE SCOPE: When write operations are added (submitting reviews, starting
+assignments, managing the lesson queue), convert this file into a package:
+
+    backend/services/wanikani/
+        __init__.py
+        subjects.py     -- fetch vocab and kanji (this file's current content)
+        assignments.py  -- fetch review queue, start lessons
+        reviews.py      -- submit review results back to WaniKani
+        user.py         -- fetch user level and subscription info
 """
+
+import re
 
 import httpx
 
+from backend.core.cache import CacheProvider, InMemoryCache
 from backend.core.config import WANIKANI_BASE_URL, WANIKANI_REVISION
 from backend.models.quiz import QuizItem
+
+
+# Active cache implementation. To swap storage backends, write a class that
+# satisfies CacheProvider and replace InMemoryCache here. Nothing else changes.
+_subject_cache: CacheProvider[list[QuizItem]] = InMemoryCache()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _strip_markup(text: str | None) -> str | None:
+    """
+    Strip WaniKani's custom markup tags from mnemonic text.
+
+    WaniKani mnemonics contain tags like <radical>ground</radical>,
+    <kanji>One</kanji>, <reading>itchy</reading> etc. These are rendered
+    as colored highlights on wanikani.com but are meaningless as raw strings.
+    This strips the tags and keeps only the inner text.
+    """
+    if text is None:
+        return None
+    return re.sub(r"<[^>]+>", "", text)
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -35,6 +71,10 @@ def _has_kanji(text: str) -> bool:
     """
     return any("一" <= ch <= "鿿" for ch in text)
 
+
+# ---------------------------------------------------------------------------
+# WaniKani API calls
+# ---------------------------------------------------------------------------
 
 def get_user_level(token: str) -> int:
     """
@@ -76,7 +116,6 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
         A list of QuizItems built from the filtered subjects.
     """
     items: list[QuizItem] = []
-    # Fetch both vocabulary and kanji -- radicals have no readings so they're excluded.
     url: str | None = (
         f"{WANIKANI_BASE_URL}/subjects?types=vocabulary,kanji&levels={level}"
     )
@@ -87,37 +126,31 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
         payload = response.json()
 
         for subject in payload["data"]:
-            subject_type: str = subject["object"]  # "vocabulary" or "kanji"
+            subject_type: str = subject["object"]
             data = subject["data"]
 
-            # Skip subjects hidden on WaniKani.
             if data.get("hidden_at"):
                 continue
 
             characters: str = data.get("characters", "")
 
-            # Skip kana-only items -- no kanji reading to guess.
             if not _has_kanji(characters):
                 continue
 
             readings = data.get("readings", [])
 
-            # Primary reading is displayed in the result banner after submission.
             primary_reading = next(
                 (r["reading"] for r in readings if r.get("primary")), None
             )
             if not primary_reading:
                 continue
 
-            # Accepted readings are all readings WaniKani marks as correct.
-            # Vocabulary typically has one; kanji can have several (on'yomi, kun'yomi).
             accepted_readings = [
                 r["reading"] for r in readings if r.get("accepted_answer")
             ]
             if not accepted_readings:
                 accepted_readings = [primary_reading]
 
-            # Primary meaning is the main English definition.
             meanings = data.get("meanings", [])
             primary_meaning = next(
                 (m["meaning"] for m in meanings if m.get("primary")), None
@@ -132,28 +165,27 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
                     accepted_readings=accepted_readings,
                     meaning=primary_meaning,
                     subject_type=subject_type,
+                    reading_mnemonic=_strip_markup(data.get("reading_mnemonic")),
+                    meaning_mnemonic=_strip_markup(data.get("meaning_mnemonic")),
                 )
             )
 
-        # Follow pagination until next_url is null.
         url = payload["pages"].get("next_url")
 
     return items
 
 
-# In-memory cache keyed by token. Persists for the lifetime of the server
-# process so WaniKani is not called on every quiz round.
-# Cache is cleared on server restart and repopulated on first request.
-_cache: dict[str, list[QuizItem]] = {}
-
+# ---------------------------------------------------------------------------
+# Public interface
+# ---------------------------------------------------------------------------
 
 def get_items_for_token(token: str) -> list[QuizItem]:
     """
     Return quiz items for the given WaniKani token, using the cache if available.
 
     On the first call for a token, fetches the user's level then fetches
-    vocabulary subjects for that level. Caches the result. Returns an empty
-    list if anything fails -- the caller should fall back to the hardcoded list.
+    subjects for that level and caches the result. Returns an empty list if
+    anything fails -- the caller should fall back to the hardcoded list.
 
     Args:
         token: The user's WaniKani personal access token.
@@ -161,15 +193,28 @@ def get_items_for_token(token: str) -> list[QuizItem]:
     Returns:
         A list of QuizItems from WaniKani, or an empty list on failure.
     """
-    if token in _cache:
-        return _cache[token]
+    if _subject_cache.contains(token):
+        return _subject_cache.get(token) or []
 
     try:
         level = get_user_level(token)
         items = _fetch_subjects(token, level)
-        _cache[token] = items
+        _subject_cache.set(token, items)
     except Exception:
-        # Any network or auth failure falls back silently to the hardcoded list.
-        _cache[token] = []
+        _subject_cache.set(token, [])
 
-    return _cache[token]
+    return _subject_cache.get(token) or []
+
+
+def get_character_list(token: str) -> list[str]:
+    """
+    Return just the characters from the cached item list for a token.
+
+    Used to pass a compact vocabulary list to Claude so it can suggest
+    related compounds the student actually knows, without passing full
+    QuizItem objects which would be too many tokens.
+
+    Returns an empty list if the token hasn't been fetched yet or failed.
+    """
+    items = _subject_cache.get(token)
+    return [item.characters for item in items] if items else []
