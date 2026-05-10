@@ -35,3 +35,10 @@ ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
 
 WANIKANI_BASE_URL: str = "https://api.wanikani.com/v2"
 WANIKANI_REVISION: str = "20170710"
+
+# ---------------------------------------------------------------------------
+# Queue
+# ---------------------------------------------------------------------------
+
+DEFAULT_QUEUE_MODE: str = "shuffle"
+DEFAULT_BATCH_SIZE: int = 10

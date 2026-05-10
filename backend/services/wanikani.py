@@ -36,6 +36,12 @@ from backend.models.quiz import QuizItem, ReviewStats
 _subject_cache: CacheProvider[list[QuizItem]] = InMemoryCache()
 _review_stats_cache: CacheProvider[dict[int, ReviewStats]] = InMemoryCache()
 
+# SCALE NOTE: A level 60 WaniKani user has ~6,000-7,000 vocabulary+kanji subjects.
+# First load for "all reviewed" requires multiple paginated API calls for subjects,
+# review stats, and assignments -- potentially 20+ requests, risking the 60 req/min
+# rate limit. Memory cost is negligible (~14MB). Latency is the real constraint.
+# Future mitigation: background fetch, incremental loading, If-Modified-Since headers.
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -268,9 +274,15 @@ def get_items_for_token(token: str) -> list[QuizItem]:
 
         # Embed review stats into each item using model_copy so Pydantic
         # immutability is respected -- creates a new instance with the field updated.
+        # Guard against subject_id being None (shouldn't happen for WaniKani items
+        # but the field type allows it for hardcoded fallback items).
         items = [
             item.model_copy(
-                update={"review_stats": review_stats.get(item.subject_id)}
+                update={
+                    "review_stats": review_stats.get(item.subject_id)
+                    if item.subject_id is not None
+                    else None
+                }
             )
             for item in items
         ]
@@ -379,7 +391,11 @@ def get_all_reviewed_subjects(token: str) -> list[QuizItem]:
         review_stats = _fetch_review_stats(token, subject_ids)
         items = [
             item.model_copy(
-                update={"review_stats": review_stats.get(item.subject_id)}
+                update={
+                    "review_stats": review_stats.get(item.subject_id)
+                    if item.subject_id is not None
+                    else None
+                }
             )
             for item in items
         ]

@@ -25,24 +25,38 @@ Run with:
 """
 
 import os
+import uuid
 
 import requests
 import streamlit as st
 
-# Overridden by an environment variable in deployment (Milestone 6)
-# so the frontend knows where the deployed backend lives.
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 
-# Source options shown in the dropdown.
-# Keys match the source parameter the backend expects.
-SOURCE_OPTIONS = {
+# Available queue modes per source.
+# Keeps the frontend and backend restriction logic in sync.
+MODES_BY_SOURCE: dict[str, list[str]] = {
+    "current_level": ["Random", "Shuffle", "Sequential", "Mini-batch", "Weighted"],
+    "all_reviewed":  ["Random", "Shuffle", "Mini-batch"],
+    "fallback":      ["Random", "Shuffle", "Sequential"],
+    "custom":        ["Random", "Shuffle", "Sequential", "Mini-batch", "Weighted"],
+}
+
+# Maps display labels to backend mode keys.
+MODE_KEYS: dict[str, str] = {
+    "Random":     "random",
+    "Shuffle":    "shuffle",
+    "Sequential": "sequential",
+    "Mini-batch": "mini-batch",
+    "Weighted":   "weighted",
+}
+
+SOURCE_OPTIONS: dict[str, str] = {
     "current_level": "WaniKani current level",
     "all_reviewed":  "WaniKani all reviewed",
     "fallback":      "N4 fallback",
     "custom":        "Upload your own",
 }
 
-# Human-readable labels for pattern codes returned by Claude.
 PATTERN_LABELS: dict[str, str] = {
     "on+on":     "On+On (both on'yomi)",
     "kun+kun":   "Kun+Kun (both kun'yomi)",
@@ -59,7 +73,6 @@ PATTERN_LABELS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _fresh_session_stats() -> dict:
-    """Return a clean session stats dict for a new session."""
     return {
         "attempted": 0,
         "correct": 0,
@@ -72,6 +85,12 @@ def _fresh_session_stats() -> dict:
 
 def _init_state() -> None:
     """Set session state keys on first load only. Safe to call on every rerun."""
+    if "queue_session_id" not in st.session_state:
+        # UUID generated once per browser session. Identifies this user's queue
+        # and persists across reruns until the tab is closed.
+        st.session_state.queue_session_id = str(uuid.uuid4())
+    if "upload_session_id" not in st.session_state:
+        st.session_state.upload_session_id = None
     if "current_item" not in st.session_state:
         st.session_state.current_item = None
     if "result" not in st.session_state:
@@ -84,46 +103,38 @@ def _init_state() -> None:
         st.session_state.session_stats = _fresh_session_stats()
     if "source" not in st.session_state:
         st.session_state.source = "fallback"
-    if "session_id" not in st.session_state:
-        st.session_state.session_id = None
+    if "queue_mode" not in st.session_state:
+        st.session_state.queue_mode = "Shuffle"
+    if "batch_size" not in st.session_state:
+        st.session_state.batch_size = 10
 
 
 def _reset_session() -> None:
-    """
-    Reset all quiz and stats state. Called when token or source changes.
-
-    A token change means a different WaniKani account. A source change means
-    a different item pool. Either way, mixing old session stats with new items
-    would be misleading.
-    """
+    """Reset quiz and stats state. Called on token, source, or mode change."""
     st.session_state.current_item = None
     st.session_state.result = None
     st.session_state.hint = None
     st.session_state.session_stats = _fresh_session_stats()
 
 
+# ---------------------------------------------------------------------------
+# Backend calls
+# ---------------------------------------------------------------------------
+
 def _load_new_item() -> None:
-    """
-    Fetch a random quiz item from the backend and reset result and hint state.
-
-    Passes wanikani_token, source, and session_id as query parameters.
-    The backend routes to the correct source and returns a random item.
-    The first call with a new WaniKani token will be slow while the backend
-    fetches and caches subjects and review stats.
-    """
-    params: dict = {"source": st.session_state.source}
-
+    """Fetch the next quiz item from the backend using the active queue."""
+    params: dict = {
+        "source": st.session_state.source,
+        "queue_session_id": st.session_state.queue_session_id,
+    }
     if st.session_state.wanikani_token:
         params["wanikani_token"] = st.session_state.wanikani_token
-
-    if st.session_state.session_id:
-        params["session_id"] = st.session_state.session_id
+    if st.session_state.upload_session_id:
+        params["upload_session_id"] = st.session_state.upload_session_id
 
     try:
         response = requests.get(
-            f"{API_BASE_URL}/quiz/item",
-            params=params,
-            timeout=20,
+            f"{API_BASE_URL}/quiz/item", params=params, timeout=20
         )
         response.raise_for_status()
         st.session_state.current_item = response.json()
@@ -136,7 +147,7 @@ def _load_new_item() -> None:
 
 
 def _submit_guess(guess: str) -> None:
-    """POST the guess to /quiz/explain and store the result in session state."""
+    """POST the guess to /quiz/explain and store the result."""
     item = st.session_state.current_item
     token = st.session_state.wanikani_token
     try:
@@ -161,7 +172,7 @@ def _submit_guess(guess: str) -> None:
 
 
 def _fetch_hint() -> None:
-    """POST to /quiz/hint and store the hint text in session state."""
+    """POST to /quiz/hint and store the hint text."""
     item = st.session_state.current_item
     try:
         response = requests.post(
@@ -181,13 +192,58 @@ def _fetch_hint() -> None:
         st.stop()
 
 
-def _upload_csv(file) -> None:
-    """
-    POST an uploaded CSV file to /quiz/upload and store the returned session_id.
+def _configure_queue(mode_label: str, batch_size: int) -> None:
+    """Tell the backend to configure the queue mode and batch size."""
+    try:
+        requests.post(
+            f"{API_BASE_URL}/quiz/queue/configure",
+            json={
+                "session_id": st.session_state.queue_session_id,
+                "mode": MODE_KEYS[mode_label],
+                "batch_size": batch_size,
+                "source": st.session_state.source,
+            },
+            timeout=5,
+        )
+    except requests.exceptions.ConnectionError:
+        pass  # Non-critical -- queue will use default mode
 
-    The session_id is then passed on every GET /quiz/item call so the backend
-    knows which custom deck to draw from.
+
+def _reset_queue() -> None:
+    """Tell the backend to reset queue state for this session."""
+    try:
+        requests.post(
+            f"{API_BASE_URL}/quiz/queue/reset",
+            json={"session_id": st.session_state.queue_session_id},
+            timeout=5,
+        )
+    except requests.exceptions.ConnectionError:
+        pass
+
+
+def _record_result(characters: str, correct: bool) -> None:
     """
+    Fire-and-forget result recording for weighted mode adjustment.
+
+    Failures are silently ignored -- this is a best-effort call that
+    only matters in weighted mode and is non-critical if it fails.
+    """
+    try:
+        requests.post(
+            f"{API_BASE_URL}/quiz/queue/result",
+            json={
+                "session_id": st.session_state.queue_session_id,
+                "characters": characters,
+                "correct": correct,
+            },
+            timeout=5,
+        )
+    except requests.exceptions.ConnectionError:
+        pass
+
+
+def _upload_csv(file) -> None:
+    """POST an uploaded CSV file and store the returned upload_session_id."""
     try:
         response = requests.post(
             f"{API_BASE_URL}/quiz/upload",
@@ -196,9 +252,10 @@ def _upload_csv(file) -> None:
         )
         response.raise_for_status()
         data = response.json()
-        st.session_state.session_id = data["session_id"]
+        st.session_state.upload_session_id = data["session_id"]
         st.success(f"Uploaded {data['item_count']} compounds.")
         _reset_session()
+        _reset_queue()
     except requests.exceptions.HTTPError as exc:
         st.error(f"Upload failed: {exc.response.json().get('detail', 'Unknown error')}")
     except requests.exceptions.ConnectionError:
@@ -206,10 +263,7 @@ def _upload_csv(file) -> None:
 
 
 def _update_session_stats(item: dict, result: dict) -> None:
-    """
-    Update session stats after a submission. Called once per round via the
-    stats_updated guard to prevent double-counting on Streamlit reruns.
-    """
+    """Update session stats once per round using the stats_updated guard."""
     if st.session_state.session_stats["stats_updated"]:
         return
 
@@ -217,7 +271,6 @@ def _update_session_stats(item: dict, result: dict) -> None:
     pattern = result.get("pattern")
 
     stats["attempted"] += 1
-
     if result["is_correct"]:
         stats["correct"] += 1
         if pattern:
@@ -228,6 +281,7 @@ def _update_session_stats(item: dict, result: dict) -> None:
         stats["missed_compounds"].append(item["characters"])
 
     stats["stats_updated"] = True
+    _record_result(item["characters"], result["is_correct"])
 
 
 # ---------------------------------------------------------------------------
@@ -235,21 +289,23 @@ def _update_session_stats(item: dict, result: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_sidebar() -> None:
-    """
-    Render the sidebar: WaniKani settings, source selection, and session stats.
-
-    WaniKani settings collapse once a token is set. Source dropdown sits below.
-    File uploader appears only when 'custom' source is selected.
-    """
     with st.sidebar:
 
-        # WaniKani Settings -- collapses once token is set.
-        with st.expander(
-            "WaniKani Settings",
-            expanded=not bool(st.session_state.wanikani_token),
+        # Active source indicator -- always visible, always accurate.
+        source_label = SOURCE_OPTIONS.get(st.session_state.source, st.session_state.source)
+        st.markdown(f"**Active source:** {source_label}")
+        if (
+            st.session_state.wanikani_token
+            and st.session_state.source not in ("current_level", "all_reviewed")
         ):
+            st.caption("WaniKani token set but not used for this source.")
+
+        st.divider()
+
+        # Source Settings expander -- WaniKani token + source dropdown + file upload.
+        with st.expander("Source Settings", expanded=False):
             st.caption(
-                "Paste a read-only API token from "
+                "WaniKani token from "
                 "[wanikani.com/settings/personal_access_tokens]"
                 "(https://www.wanikani.com/settings/personal_access_tokens)."
             )
@@ -261,62 +317,85 @@ def _render_sidebar() -> None:
             )
             if token != st.session_state.wanikani_token:
                 st.session_state.wanikani_token = token
-                # Reset to fallback if WaniKani token is removed.
                 if not token and st.session_state.source in ("current_level", "all_reviewed"):
                     st.session_state.source = "fallback"
                 _reset_session()
+                _reset_queue()
 
-        if st.session_state.wanikani_token:
-            st.success("Connected to WaniKani")
-        else:
-            st.info("No WaniKani token -- WaniKani sources unavailable")
-
-        st.divider()
-
-        # Source selection dropdown.
-        # WaniKani sources are disabled (shown but won't work) without a token.
-        has_token = bool(st.session_state.wanikani_token)
-        available_sources = {
-            k: v + (" ⚠ token required" if k in ("current_level", "all_reviewed") and not has_token else "")
-            for k, v in SOURCE_OPTIONS.items()
-        }
-
-        selected_label = st.selectbox(
-            "Quiz source",
-            options=list(available_sources.values()),
-            index=list(available_sources.keys()).index(st.session_state.source),
-        )
-        selected_source = [k for k, v in available_sources.items() if v == selected_label][0]
-
-        if selected_source != st.session_state.source:
-            st.session_state.source = selected_source
-            st.session_state.session_id = None
-            _reset_session()
-
-        # File uploader -- only shown when custom source is selected.
-        if st.session_state.source == "custom":
-            st.caption(
-                "Upload a CSV with columns: `characters`, `reading`, `meaning`. "
-                "Save the file as UTF-8 encoding. "
-                "Bogus readings, non-Japanese characters, or wrong meanings will produce "
-                "inaccurate Claude explanations -- garbage in, garbage out."
+            has_token = bool(st.session_state.wanikani_token)
+            available_sources = {
+                k: v + (" ⚠ token required" if k in ("current_level", "all_reviewed") and not has_token else "")
+                for k, v in SOURCE_OPTIONS.items()
+            }
+            selected_label = st.selectbox(
+                "Quiz source",
+                options=list(available_sources.values()),
+                index=list(available_sources.keys()).index(st.session_state.source),
             )
-            uploaded = st.file_uploader("Choose a CSV file", type="csv")
-            # Only upload when a new file arrives. Streamlit reruns the script
-            # on every interaction -- comparing name and size guards against
-            # re-uploading the same file on each rerun. React won't need this
-            # guard since it only fires the upload event once naturally.
-            if uploaded:
-                file_key = f"{uploaded.name}:{uploaded.size}"
-                if st.session_state.get("last_uploaded_key") != file_key:
-                    st.session_state.last_uploaded_key = file_key
-                    _upload_csv(uploaded)
+            selected_source = [k for k, v in available_sources.items() if v == selected_label][0]
 
-        st.divider()
+            if selected_source != st.session_state.source:
+                st.session_state.source = selected_source
+                st.session_state.upload_session_id = None
+                if st.session_state.queue_mode not in MODES_BY_SOURCE[selected_source]:
+                    st.session_state.queue_mode = "Shuffle"
+                _reset_session()
+                _reset_queue()
 
-        # Session stats -- shown once the user has attempted something.
+            if st.session_state.source == "custom":
+                st.caption(
+                    "CSV columns: `characters`, `reading`, `meaning`. "
+                    "UTF-8 encoding required. Bogus data produces bad explanations."
+                )
+                uploaded = st.file_uploader("Choose a CSV file", type="csv")
+                if uploaded:
+                    file_key = f"{uploaded.name}:{uploaded.size}"
+                    if st.session_state.get("last_uploaded_key") != file_key:
+                        st.session_state.last_uploaded_key = file_key
+                        _upload_csv(uploaded)
+
+        # Queue Settings expander -- mode, batch size, reset.
+        with st.expander("Queue Settings", expanded=False):
+            available_modes = MODES_BY_SOURCE[st.session_state.source]
+            if st.session_state.queue_mode not in available_modes:
+                st.session_state.queue_mode = "Shuffle"
+
+            selected_mode = st.selectbox(
+                "Mode",
+                options=available_modes,
+                index=available_modes.index(st.session_state.queue_mode),
+            )
+
+            batch_size = st.session_state.batch_size
+            if selected_mode == "Mini-batch":
+                batch_size = st.number_input(
+                    "Batch size",
+                    min_value=5,
+                    max_value=100,
+                    value=st.session_state.batch_size,
+                    step=1,
+                )
+
+            mode_changed = selected_mode != st.session_state.queue_mode
+            batch_changed = batch_size != st.session_state.batch_size
+
+            if mode_changed or batch_changed:
+                st.session_state.queue_mode = selected_mode
+                st.session_state.batch_size = int(batch_size)
+                _configure_queue(selected_mode, int(batch_size))
+                _reset_session()
+                st.session_state.current_item = None
+
+            if st.button("Reset queue", use_container_width=True):
+                _reset_queue()
+                _reset_session()
+                st.session_state.current_item = None
+                st.rerun()
+
+        # Session stats
         stats = st.session_state.session_stats
         if stats["attempted"] > 0:
+            st.divider()
             st.subheader("This Session")
 
             accuracy = stats["correct"] / stats["attempted"] * 100
@@ -349,14 +428,6 @@ def _render_sidebar() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """
-    Main UI function, called on every rerun.
-
-    Two states driven by st.session_state.result:
-      None     -- show compound, input field, Hint + Submit + Skip
-      not None -- show closeness feedback, Claude's explanation,
-                  WaniKani stats, mnemonics, Next button
-    """
     st.set_page_config(page_title="Jouzu", page_icon="上", layout="centered")
     _init_state()
     _render_sidebar()
@@ -365,13 +436,11 @@ def main() -> None:
     st.caption("Kanji reading drill -- learn the patterns, not just the answers.")
     st.caption("⚠ Powered by Claude (Anthropic). Explanations may occasionally be inaccurate -- treat them as a study aid, not a dictionary.")
 
-    # Warn if a WaniKani source is selected without a token.
     if st.session_state.source in ("current_level", "all_reviewed") and not st.session_state.wanikani_token:
         st.warning("A WaniKani token is required for this source. Add one in the sidebar or switch to N4 fallback.")
         st.stop()
 
-    # Warn if custom source is selected but no file has been uploaded yet.
-    if st.session_state.source == "custom" and not st.session_state.session_id:
+    if st.session_state.source == "custom" and not st.session_state.upload_session_id:
         st.info("Upload a CSV file in the sidebar to start drilling your own deck.")
         st.stop()
 
@@ -385,7 +454,6 @@ def main() -> None:
     if result is not None:
         _update_session_stats(item, result)
 
-    # Color matches WaniKani: pink for kanji, purple for vocabulary.
     subject_type = item.get("subject_type", "vocabulary")
     color = "#f02049" if subject_type == "kanji" else "#9820f0"
 
