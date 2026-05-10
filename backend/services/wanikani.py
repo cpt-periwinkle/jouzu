@@ -2,8 +2,11 @@
 WaniKani API client.
 
 Fetches vocabulary and kanji subjects for a user's current level and converts
-them into QuizItems. Results are cached via CacheProvider so WaniKani is only
-called once per token per server session -- not on every quiz round.
+them into QuizItems. Also fetches lifetime review statistics per subject so the
+frontend can show WaniKani accuracy alongside session stats.
+
+Results are cached via CacheProvider so WaniKani is only called once per token
+per server session -- not on every quiz round.
 
 All functions that make network calls raise httpx.HTTPStatusError on
 non-2xx responses. Callers are responsible for handling those errors.
@@ -25,12 +28,13 @@ import httpx
 
 from backend.core.cache import CacheProvider, InMemoryCache
 from backend.core.config import WANIKANI_BASE_URL, WANIKANI_REVISION
-from backend.models.quiz import QuizItem
+from backend.models.quiz import QuizItem, ReviewStats
 
 
-# Active cache implementation. To swap storage backends, write a class that
+# Active cache implementations. To swap storage backends, write a class that
 # satisfies CacheProvider and replace InMemoryCache here. Nothing else changes.
 _subject_cache: CacheProvider[list[QuizItem]] = InMemoryCache()
+_review_stats_cache: CacheProvider[dict[int, ReviewStats]] = InMemoryCache()
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +130,7 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
         payload = response.json()
 
         for subject in payload["data"]:
+            subject_id: int = subject["id"]
             subject_type: str = subject["object"]
             data = subject["data"]
 
@@ -160,6 +165,7 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
 
             items.append(
                 QuizItem(
+                    subject_id=subject_id,
                     characters=characters,
                     reading=primary_reading,
                     accepted_readings=accepted_readings,
@@ -175,6 +181,53 @@ def _fetch_subjects(token: str, level: int) -> list[QuizItem]:
     return items
 
 
+def _fetch_review_stats(
+    token: str, subject_ids: list[int]
+) -> dict[int, ReviewStats]:
+    """
+    Fetch lifetime review statistics for the given subject IDs from WaniKani.
+
+    Only subjects the user has already reviewed will appear in the response --
+    unreviewed subjects are simply absent from the returned dict.
+
+    Args:
+        token: The user's WaniKani personal access token.
+        subject_ids: The WaniKani subject IDs to fetch stats for.
+
+    Returns:
+        A dict mapping subject_id to ReviewStats.
+    """
+    if not subject_ids:
+        return {}
+
+    stats: dict[int, ReviewStats] = {}
+    ids_str = ",".join(str(i) for i in subject_ids)
+    url: str | None = (
+        f"{WANIKANI_BASE_URL}/review_statistics?subject_ids={ids_str}"
+    )
+
+    while url:
+        response = httpx.get(url, headers=_headers(token), timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+
+        for entry in payload["data"]:
+            data = entry["data"]
+            stats[data["subject_id"]] = ReviewStats(
+                meaning_correct=data["meaning_correct"],
+                meaning_incorrect=data["meaning_incorrect"],
+                reading_correct=data["reading_correct"],
+                reading_incorrect=data["reading_incorrect"],
+                percentage_correct=data["percentage_correct"],
+                meaning_current_streak=data["meaning_current_streak"],
+                reading_current_streak=data["reading_current_streak"],
+            )
+
+        url = payload["pages"].get("next_url")
+
+    return stats
+
+
 # ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
@@ -183,15 +236,21 @@ def get_items_for_token(token: str) -> list[QuizItem]:
     """
     Return quiz items for the given WaniKani token, using the cache if available.
 
-    On the first call for a token, fetches the user's level then fetches
-    subjects for that level and caches the result. Returns an empty list if
-    anything fails -- the caller should fall back to the hardcoded list.
+    On the first call for a token:
+      1. Fetches the user's current level
+      2. Fetches subjects (vocabulary + kanji) for that level
+      3. Fetches lifetime review stats for those subjects
+      4. Embeds review stats into each QuizItem
+      5. Caches the result
+
+    Returns an empty list if anything fails -- the caller falls back to
+    the hardcoded list.
 
     Args:
         token: The user's WaniKani personal access token.
 
     Returns:
-        A list of QuizItems from WaniKani, or an empty list on failure.
+        A list of QuizItems with review stats embedded, or empty on failure.
     """
     if _subject_cache.contains(token):
         return _subject_cache.get(token) or []
@@ -199,6 +258,21 @@ def get_items_for_token(token: str) -> list[QuizItem]:
     try:
         level = get_user_level(token)
         items = _fetch_subjects(token, level)
+
+        subject_ids = [
+            item.subject_id for item in items if item.subject_id is not None
+        ]
+        review_stats = _fetch_review_stats(token, subject_ids)
+
+        # Embed review stats into each item using model_copy so Pydantic
+        # immutability is respected -- creates a new instance with the field updated.
+        items = [
+            item.model_copy(
+                update={"review_stats": review_stats.get(item.subject_id)}
+            )
+            for item in items
+        ]
+
         _subject_cache.set(token, items)
     except Exception:
         _subject_cache.set(token, [])

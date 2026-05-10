@@ -6,6 +6,8 @@ Everything else that needs an explanation or hint calls the functions here.
 If the model changes or the API changes, this is the only file to update.
 """
 
+import re
+
 import anthropic
 
 from backend.core.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
@@ -28,6 +30,24 @@ def _call_claude(prompt: str, max_tokens: int = 1024) -> str:
     )
     block = message.content[0]
     return block.text if isinstance(block, anthropic.types.TextBlock) else ""
+
+
+def _extract_pattern(text: str) -> tuple[str, str | None]:
+    """
+    Extract and strip the PATTERN tag from Claude's response text.
+
+    Claude is instructed to append a PATTERN tag at the end of explain responses.
+    This parses that tag, removes it from the display text, and returns both.
+
+    Returns:
+        A tuple of (cleaned explanation text, pattern string or None).
+    """
+    match = re.search(r"\nPATTERN:\s*([\w+]+)\s*$", text)
+    if match:
+        pattern = match.group(1)
+        cleaned = text[: match.start()].strip()
+        return cleaned, pattern
+    return text.strip(), None
 
 
 def get_explanation(
@@ -76,8 +96,14 @@ def get_explanation(
         known_vocabulary=known_vocabulary,
     )
 
-    explanation = _call_claude(prompt, max_tokens=1200)
-    return ExplainResponse(is_correct=is_correct, closeness=closeness, explanation=explanation)
+    raw = _call_claude(prompt, max_tokens=1200)
+    explanation, pattern = _extract_pattern(raw)
+    return ExplainResponse(
+        is_correct=is_correct,
+        closeness=closeness,
+        explanation=explanation,
+        pattern=pattern,
+    )
 
 
 def get_hint(

@@ -47,7 +47,19 @@ Respond in exactly this structure:
    If this compound has an irregular reading or a common exception worth knowing, note it here.
    Skip this section entirely if there is nothing unusual.
 
-Keep it tight. The student reads this after every round -- don't make it a wall of text."""
+Keep it tight. The student reads this after every round -- don't make it a wall of text.
+
+Finally, on its own line at the very end, output exactly one pattern tag from this list:
+PATTERN: on+on
+PATTERN: kun+kun
+PATTERN: on+kun
+PATTERN: kun+on
+PATTERN: irregular
+PATTERN: single
+PATTERN: mixed
+
+Choose the tag that best describes the primary reading pattern of {characters}.
+Output only the tag line -- no explanation after it."""
 
 
 HINT_TEMPLATE = """You are a Japanese tutor giving a student a hint for reading {characters} ({meaning}).
