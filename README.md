@@ -19,7 +19,11 @@ You see a kanji compound. You guess the reading (hiragana or romaji). Claude exp
 - **Upload your own** -- bring a CSV and drill whatever you want
 
 **Queue modes:**
-- Shuffle, Sequential, Mini-batch, Weighted (miss more = see more), Random
+- **Shuffle** -- no repeats until every item is seen, then reshuffles
+- **Sequential** -- items in order, loops back to the start
+- **Mini-batch** -- drills N items at a time before moving to the next group (configurable, 5-100)
+- **Weighted** -- items you miss appear more often, capped at 3x frequency
+- **Random** -- pure random, anything goes
 
 **WaniKani integration:**
 - Color-coded by subject type (purple for vocabulary, pink for kanji, matching WaniKani)
@@ -114,6 +118,12 @@ characters,reading,meaning
 
 Claude generates the full explanation from the characters and reading -- meanings are used as hints only.
 __Bad readings or non-Japanese characters will produce confused explanations. Garbage in, garbage out.__
+
+---
+
+## Architecture
+
+Interested in the design decisions -- why the backend is stateless, how the queue system works, what the growth path looks like? Read [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

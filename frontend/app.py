@@ -107,6 +107,16 @@ def _init_state() -> None:
         st.session_state.queue_mode = "Shuffle"
     if "batch_size" not in st.session_state:
         st.session_state.batch_size = 10
+    if "seen_items" not in st.session_state:
+        # Every item shown is cached here by characters string.
+        # Drill mode pulls from this cache so it doesn't need backend calls.
+        st.session_state.seen_items = {}
+    if "drill_mode" not in st.session_state:
+        st.session_state.drill_mode = False
+    if "drill_queue" not in st.session_state:
+        st.session_state.drill_queue = []
+    if "drill_streaks" not in st.session_state:
+        st.session_state.drill_streaks = {}
 
 
 def _reset_session() -> None:
@@ -115,14 +125,52 @@ def _reset_session() -> None:
     st.session_state.result = None
     st.session_state.hint = None
     st.session_state.session_stats = _fresh_session_stats()
+    st.session_state.seen_items = {}
+    st.session_state.drill_mode = False
+    st.session_state.drill_queue = []
+    st.session_state.drill_streaks = {}
 
 
 # ---------------------------------------------------------------------------
 # Backend calls
 # ---------------------------------------------------------------------------
 
+def _load_drill_item() -> None:
+    """
+    Load the next item for drill mode from the seen_items cache.
+
+    Picks randomly from compounds still in the drill queue (streak < 2).
+    When all items are cleared, exits drill mode automatically.
+    """
+    import random as _random
+    pending = [
+        chars for chars in st.session_state.drill_queue
+        if st.session_state.drill_streaks.get(chars, 0) < 2
+    ]
+    if not pending:
+        st.session_state.drill_mode = False
+        st.session_state.current_item = None
+        return
+
+    chars = _random.choice(pending)
+    item = st.session_state.seen_items.get(chars)
+    if item:
+        st.session_state.current_item = item
+        st.session_state.result = None
+        st.session_state.hint = None
+        st.session_state.session_stats["stats_updated"] = False
+    else:
+        # Item missing from cache -- skip it and try again.
+        st.session_state.drill_streaks[chars] = 2
+        _load_drill_item()
+
+
 def _load_new_item() -> None:
     """Fetch the next quiz item from the backend using the active queue."""
+    if st.session_state.drill_mode:
+        _load_drill_item()
+        return
+
     params: dict = {
         "source": st.session_state.source,
         "queue_session_id": st.session_state.queue_session_id,
@@ -137,7 +185,10 @@ def _load_new_item() -> None:
             f"{API_BASE_URL}/quiz/item", params=params, timeout=20
         )
         response.raise_for_status()
-        st.session_state.current_item = response.json()
+        item_data = response.json()
+        st.session_state.current_item = item_data
+        # Cache every item shown so drill mode can serve them without backend calls.
+        st.session_state.seen_items[item_data["characters"]] = item_data
         st.session_state.result = None
         st.session_state.hint = None
         st.session_state.session_stats["stats_updated"] = False
@@ -283,6 +334,16 @@ def _update_session_stats(item: dict, result: dict) -> None:
     stats["stats_updated"] = True
     _record_result(item["characters"], result["is_correct"])
 
+    # Update drill streak for this compound if in drill mode.
+    if st.session_state.drill_mode:
+        chars = item["characters"]
+        if result["is_correct"]:
+            st.session_state.drill_streaks[chars] = (
+                st.session_state.drill_streaks.get(chars, 0) + 1
+            )
+        else:
+            st.session_state.drill_streaks[chars] = 0
+
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -366,6 +427,15 @@ def _render_sidebar() -> None:
                 index=available_modes.index(st.session_state.queue_mode),
             )
 
+            mode_descriptions = {
+                "Random":     "Pure random -- anything goes, items can repeat immediately.",
+                "Shuffle":    "No repeats until every item is seen, then reshuffles.",
+                "Sequential": "Items in order, loops back to the start when exhausted.",
+                "Mini-batch": "Drills N items at a time before moving to the next group.",
+                "Weighted":   "Items you miss appear more often (capped at 3x frequency).",
+            }
+            st.caption(mode_descriptions.get(selected_mode, ""))
+
             batch_size = st.session_state.batch_size
             if selected_mode == "Mini-batch":
                 batch_size = st.number_input(
@@ -421,6 +491,41 @@ def _render_sidebar() -> None:
             if stats["missed_compounds"]:
                 st.markdown("**Missed this session**")
                 st.markdown("、".join(stats["missed_compounds"]))
+                if st.button("Clear misses", use_container_width=True):
+                    stats["missed_compounds"] = []
+                    st.session_state.drill_queue = []
+                    st.session_state.drill_streaks = {}
+                    st.rerun()
+
+            # Drill my misses button -- only shown when there are misses
+            # and drill mode is not already active.
+            unique_misses = list(set(stats["missed_compounds"]))
+            if unique_misses and not st.session_state.drill_mode:
+                if st.button(
+                    f"Drill my misses ({len(unique_misses)})",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    st.session_state.drill_mode = True
+                    st.session_state.drill_queue = unique_misses
+                    st.session_state.drill_streaks = {c: 0 for c in unique_misses}
+                    st.session_state.current_item = None
+                    st.rerun()
+
+        # Drill mode status -- shown outside the stats block so it's
+        # visible even when stats haven't been updated yet.
+        if st.session_state.drill_mode:
+            pending = [
+                c for c in st.session_state.drill_queue
+                if st.session_state.drill_streaks.get(c, 0) < 2
+            ]
+            cleared = len(st.session_state.drill_queue) - len(pending)
+            st.divider()
+            st.info(f"Drill mode: {cleared}/{len(st.session_state.drill_queue)} cleared")
+            if st.button("Exit drill", use_container_width=True):
+                st.session_state.drill_mode = False
+                st.session_state.current_item = None
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +549,23 @@ def main() -> None:
         st.info("Upload a CSV file in the sidebar to start drilling your own deck.")
         st.stop()
 
+    # Check drill completion before loading next item.
+    if st.session_state.drill_mode:
+        pending = [
+            c for c in st.session_state.drill_queue
+            if st.session_state.drill_streaks.get(c, 0) < 2
+        ]
+        if not pending:
+            st.balloons()
+            st.success("全部正解! All misses cleared. よくできました!")
+            st.session_state.drill_mode = False
+            st.session_state.current_item = None
+            if st.button("Back to normal quiz", type="primary"):
+                st.rerun()
+            st.stop()
+
     if st.session_state.current_item is None:
-        with st.spinner("Fetching vocabulary..."):
+        with st.spinner("Fetching vocabulary..." if not st.session_state.drill_mode else "Loading drill item..."):
             _load_new_item()
 
     item = st.session_state.current_item
