@@ -59,46 +59,54 @@ This is genuinely a work in progress. Things I'm planning:
 
 ## Running locally
 
-**Prerequisites:**
+**What you need:**
 - Python 3.10+
-- An Anthropic API key (console.anthropic.com -- separate from claude.ai, requires billing)
-- A WaniKani API token (optional, wanikani.com/settings/personal_access_tokens -- read-only is fine (FOR NOW))
+- An Anthropic API key -- required. Get one at [console.anthropic.com](https://console.anthropic.com) (separate from claude.ai, requires billing). $5 of credits is more than enough to get started.
+- A WaniKani API token -- optional, but strongly recommended. Without it you get a fixed 20-word N4 fallback deck. With it you drill your own vocabulary at your own level. Get a read-only token at [wanikani.com/settings/personal_access_tokens](https://www.wanikani.com/settings/personal_access_tokens). The token is never stored server-side -- you paste it in the app sidebar at runtime.
 
-**Setup:**
+**Quickstart:**
 
 ```bash
 git clone https://github.com/yourusername/jouzu.git
 cd jouzu
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+bash run.sh
+```
+
+Before running, make sure you have a Python 3.10+ environment active -- whatever you normally use (venv, pyenv, conda, etc.). The script will detect if dependencies are missing and install them automatically via `pip`. It will also ask for your Anthropic key on first run and create the `.env` file for you.
+
+Open `http://localhost:8501` in your browser once it starts. Paste your WaniKani token in the sidebar.
+
+To stop the app, press `Ctrl+C` in the terminal where `run.sh` is running. This shuts down both the backend and frontend cleanly.
+
+> **Windows users:** `run.sh` is a bash script. Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run everything from there -- it works identically to Linux.
+
+**Manual setup (if you prefer full control):**
+
+```bash
+git clone https://github.com/yourusername/jouzu.git
+cd jouzu
 pip install -r requirements.txt
 ```
 
 Create a `.env` file in the project root:
 
 ```
-ANTHROPIC_API_KEY=enter-anthropic-key
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-The WaniKani token is not stored server-side -- you paste it in the app sidebar at runtime.
+Then run in two separate terminals:
 
-**Run:**
-
-You need two terminals.
-
-Terminal 1 -- backend:
 ```bash
+# Terminal 1 -- backend
 uvicorn backend.main:app --reload
-```
 
-Terminal 2 -- frontend:
-```bash
+# Terminal 2 -- frontend
 streamlit run frontend/app.py
 ```
 
-Open `http://localhost:8501` in your browser.
+Open `http://localhost:8501`. Paste your WaniKani token in the sidebar.
 
-**Sanity check** (optional, confirms your keys work):
+**Sanity check** (optional, confirms your Anthropic key works before starting):
 ```bash
 python scripts/sanity_check.py
 ```
