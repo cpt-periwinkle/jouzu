@@ -152,9 +152,9 @@ This project was built extensively with Claude Code, and I want to be honest abo
 
 AI is abundant. Choosing not to use it to prove you can write code manually is, in my opinion, missing the point entirely. We're not here to demonstrate we can remember syntax -- we're here to write good software with good architecture. The skill that matters is understanding *why* something is done a certain way. Design, structure, the decisions about what to build and what to leave out -- that's the engineering. The code is the output of that thinking, not the thinking itself. I feel the same way about Japanese: use the tools available, learn through use, get better faster.
 
-This was not AI slop. I had a real problem and a real idea. Every design decision came from me -- the architecture, the queue system, the stateless backend, what goes in v0 and what doesn't. I questioned things, pushed back, and made sure I understood everything that went in. Claude Code generated code. I directed it. That's a valid way to build software in 2025, and I'd rather be honest about it than pretend otherwise.
+This was not AI slop. I had a real problem and a real idea. Every design decision came from me -- the architecture, the queue system, the stateless backend, what goes in v0 and what doesn't. I questioned things, pushed back, and made sure I understood everything that went in. Claude Code generated code. I directed it. That's a valid way to build software in 2026, and I'd rather be honest about it than pretend otherwise.
 
-I also chose Claude specifically for the explanations because I'm not a Japanese expert yet -- and Claude turns out to be a genuinely good language teacher. That's not a coincidence, it's the whole point of the tool.
+I also chose Claude specifically for the explanations because I'm not a Japanese expert (yet) -- and Claude turns out to be a genuinely good language teacher. That's not a coincidence, it's the whole point of the tool.
 
 One honest caveat: the app is slow. Claude takes 2-5 seconds to respond after each guess. That's the cost of real-time LLM responses and it's not going away soon. Worth it for the explanation quality, but don't expect instant feedback.
 
