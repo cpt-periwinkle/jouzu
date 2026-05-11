@@ -10,7 +10,7 @@ It's a work in progress. A real one. Not a polished side project -- an evolving 
 
 ## What it does right now
 
-You see a kanji compound. You guess the reading (hiragana or romaji). Claude explains why the compound reads the way it does -- not just the answer, but the pattern behind it. On'yomi, kun'yomi, irregular readings, related compounds from your own vocabulary list, example sentences, WaniKani mnemonics. The goal is to build intuition, not just memorize.
+You see a kanji compound. You guess the reading (hiragana or romaji). Claude explains why the compound reads the way it does, not just the answer, but the pattern behind it. On'yomi, kun'yomi, irregular readings, related compounds from your own vocabulary list, example sentences, WaniKani mnemonics. The goal is to build intuition, not just memorize.
 
 **Quiz sources:**
 - **WaniKani current level** -- drills your active level's vocabulary and kanji
@@ -34,9 +34,9 @@ You see a kanji compound. You guess the reading (hiragana or romaji). Claude exp
 
 ## Why WaniKani?
 
-I use WaniKani personally, so it was the natural integration point. But I didn't want this to be a tool that only works if you pay for WaniKani. That's why there's a fallback deck and custom CSV upload -- bring your own material and Claude still does the heavy lifting on explanations.
+I use WaniKani personally, so it was the natural integration point. But I didn't want this to be a tool that only works if you pay for WaniKani. That's why there's a fallback deck and custom CSV upload- bring your own material and Claude still does the heavy lifting on explanations.
 
-The WaniKani integration is read-only for now. Eventually I want to close the loop -- submit reviews back to WaniKani, manage the lesson queue, make Jouzu a full WaniKani client with Claude layered on top. That's on the roadmap.
+The WaniKani integration is read-only for now. Eventually I want to close the loop: submit reviews back to WaniKani, manage the lesson queue, make Jouzu a full WaniKani client with Claude layered on top. That's on the roadmap.
 
 ---
 
@@ -44,7 +44,7 @@ The WaniKani integration is read-only for now. Eventually I want to close the lo
 
 This is genuinely a work in progress. Things I'm planning:
 
-- **React frontend** -- the current Streamlit UI is functional but rough and largely AI-generated. I want to rebuild the frontend in React as a way to actually learn it. Consider the current UI a placeholder.
+- **React frontend** -- the current Streamlit UI is functional but rough and largely AI-generated. I want to rebuild the frontend in React as a way to actually learn React. Consider the current UI a placeholder.
 - **WaniKani write integration** -- submit reviews, start assignments, manage the queue from inside Jouzu
 - **Genki integration** -- I'm working through Genki I and want to drill vocabulary and grammar by chapter
 - **Persistent history** -- SQLite to track patterns across sessions, not just within one
@@ -58,7 +58,7 @@ This is genuinely a work in progress. Things I'm planning:
 **Prerequisites:**
 - Python 3.10+
 - An Anthropic API key (console.anthropic.com -- separate from claude.ai, requires billing)
-- A WaniKani API token (optional, wanikani.com/settings/personal_access_tokens -- read-only is fine)
+- A WaniKani API token (optional, wanikani.com/settings/personal_access_tokens -- read-only is fine (FOR NOW))
 
 **Setup:**
 
@@ -73,7 +73,7 @@ pip install -r requirements.txt
 Create a `.env` file in the project root:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=enter-anthropic-key
 ```
 
 The WaniKani token is not stored server-side -- you paste it in the app sidebar at runtime.
@@ -112,7 +112,8 @@ characters,reading,meaning
 映画,えいが,movie
 ```
 
-Claude generates the full explanation from the characters and reading -- meanings are used as hints only. Bad readings or non-Japanese characters will produce confused explanations. Garbage in, garbage out.
+Claude generates the full explanation from the characters and reading -- meanings are used as hints only.
+__Bad readings or non-Japanese characters will produce confused explanations. Garbage in, garbage out.__
 
 ---
 
@@ -131,6 +132,7 @@ Claude generates the full explanation from the characters and reading -- meaning
 - No persistence across sessions -- stats and queue state reset when you close the tab
 - Doesn't work offline -- depends on Anthropic API and WaniKani API
 - No rate limiting on API endpoints -- not recommended to expose publicly without adding that first
+- Uploading CSVs with bad data will cause faulty readings and either break the program or make Claude hallucinate. Guards for bad data and adjusting the prompt might be required to counter this
 
 ---
 
