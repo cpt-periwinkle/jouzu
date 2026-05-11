@@ -227,6 +227,14 @@ When persistence is added:
 - Add a user identity layer (auth) so history can be attributed to a person
 - `SessionStats` dataclass maps directly to a database row -- the shape doesn't change, just where it's stored
 
+### Testing philosophy
+
+The unit tests in `tests/unit/` were generated through Claude Code. I want to be upfront about that.
+
+I kept them because thinking about test cases -- what edge cases exist, what the expected behavior is, what breaks -- is genuinely useful regardless of who writes the code. The structure is intentional: unit tests for the stable logic now, placeholders for integration and E2E tests when the right triggers hit (React frontend, persistence, public deployment). That structure reflects actual engineering judgment, not just running a prompt.
+
+I'll be honest: like most developers, I find writing tests tedious. But I understand why they matter, especially as this project grows. The goal is a structured approach -- not test coverage for its own sake, but tests where they actually protect something.
+
 ### Rate limiting
 
 Before public deployment, add `slowapi` to the explain and hint endpoints. These are the only endpoints that incur Anthropic API costs. A simple per-IP rate limit (e.g. 30 requests per minute) bounds the worst-case cost exposure.
