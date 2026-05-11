@@ -143,6 +143,7 @@ Interested in the design decisions -- why the backend is stateless, how the queu
 - Doesn't work offline -- depends on Anthropic API and WaniKani API
 - No rate limiting on API endpoints -- not recommended to expose publicly without adding that first
 - Uploading CSVs with bad data will cause faulty readings and either break the program or make Claude hallucinate. Guards for bad data and adjusting the prompt might be required to counter this
+- The app takes 2 - 5 seconds to respond after a guess due to real-time LLM responses, and that's probably here to stay for a while.
 
 ---
 
